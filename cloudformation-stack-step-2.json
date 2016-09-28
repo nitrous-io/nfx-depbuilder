@@ -1,0 +1,588 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+
+  "Mappings": {
+    "DefaultAmiForRegion": {
+      "us-east-1": { "id": "ami-3d55272a" },
+      "us-west-1": { "id": "ami-444d0224" },
+      "us-west-2": { "id": "ami-1ccd1f7c" },
+      "eu-west-1": { "id": "ami-b6760fc5" },
+      "eu-central-1": { "id": "ami-f562909a" },
+      "ap-northeast-1": { "id": "ami-096cba68" },
+      "ap-southeast-1": { "id": "ami-7934ee1a" },
+      "ap-southeast-2": { "id": "ami-22a49541" }
+    }
+  },
+
+  "Parameters": {
+    "LambdaZipfileKey": {
+      "Type": "String",
+      "Description": "Key of Lambda function zipfile in the S3 bucket (see LambdaBucketName in stack Outputs).",
+      "AllowedPattern": ".+",
+      "ConstraintDescription": "is required."
+    },
+
+    "EcsAmiId": {
+      "Type": "String",
+      "Description": "AMI ID for use in ECS."
+    },
+
+    "KeyPair": {
+      "Type": "AWS::EC2::KeyPair::KeyName",
+      "Description": "EC2 key pair that gets added to EC2 instances in the ECS cluster."
+    },
+
+    "NotificationEmail": {
+      "Type": "String",
+      "Default": "eng@nitrous.io",
+      "Description": "Email address where notifications and alarms get sent to."
+    }
+  },
+
+  "Conditions": {
+    "UseDefaultAmi": { "Fn::Equals": [ { "Ref": "EcsAmiId" }, "" ] }
+  },
+
+  "Resources": {
+    "LambdaBucket": {
+      "Type": "AWS::S3::Bucket",
+      "DeletionPolicy": "Delete"
+    },
+
+    "DockerRepository": {
+      "Type": "AWS::ECR::Repository"
+    },
+
+    "LauncherLambdaFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Code": {
+          "S3Bucket": { "Ref": "LambdaBucket" },
+          "S3Key": { "Ref": "LambdaZipfileKey" }
+        },
+        "Handler": "function.handler",
+        "Role": { "Fn::GetAtt": ["LauncherLambdaRole", "Arn"] },
+        "MemorySize": "128",
+        "Timeout": "15",
+        "Runtime": "nodejs4.3"
+      }
+    },
+    "LauncherLambdaRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": [ "lambda.amazonaws.com" ]
+            },
+            "Action": [ "sts:AssumeRole" ]
+          }
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "ecs-task",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": "arn:aws:logs:*:*:*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:SendMessage",
+                  ],
+                  "Resource": { "Fn::GetAtt": ["JobQueue", "Arn"] }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecs:RunTask",
+                  ],
+                  "Condition": {
+                    "ArnEquals": {
+                      "ecs:cluster": { "Fn::Join": ["", [
+                        "arn:aws:ecs:",
+                        { "Ref": "AWS::Region" },
+                        ":",
+                        { "Ref": "AWS::AccountId" },
+                        ":cluster/",
+                        { "Ref": "ECSCluster" }
+                      ] ] }
+                    }
+                  },
+                  "Resource": { "Fn::Join" : ["", [
+                    "arn:aws:ecs:",
+                    { "Ref": "AWS::Region" },
+                    ":",
+                    { "Ref": "AWS::AccountId" },
+                    ":task-definition/*:*"
+                  ] ] }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "LauncherLambdaS3TriggerPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:invokeFunction",
+        "FunctionName": { "Fn::GetAtt": ["LauncherLambdaFunction", "Arn"] },
+        "Principal": "s3.amazonaws.com",
+        "SourceAccount": { "Ref" : "AWS::AccountId" },
+        "SourceArn": { "Fn::Join" : ["", [
+          "arn:aws:s3:::",
+          { "Ref" : "JobsBucket" }
+        ] ] }
+      }
+    },
+
+    "EmailNotificationTopic": {
+      "Type": "AWS::SNS::Topic",
+      "Properties": {
+        "Subscription": [{
+          "Endpoint": { "Ref": "NotificationEmail" },
+          "Protocol": "email"
+        }]
+      }
+    },
+
+    "JobsBucket": {
+      "Type": "AWS::S3::Bucket",
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "NotificationConfiguration": {
+          "LambdaConfigurations": [
+            {
+              "Event": "s3:ObjectCreated:*",
+              "Filter": {
+                "S3Key": {
+                  "Rules": [
+                    { "Name": "prefix", "Value": "jobs/" },
+                    { "Name": "suffix", "Value": ".json" }
+                  ]
+                }
+              },
+              "Function": { "Fn::GetAtt": ["LauncherLambdaFunction", "Arn"] }
+            }
+          ]
+        }
+      }
+    },
+
+    "JobQueue": {
+       "Type": "AWS::SQS::Queue",
+       "Properties": {
+         "VisibilityTimeout": "300"
+       }
+    },
+    "JobQueueDepthAlert": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "Alarm if queue depth grows beyond 10 messages",
+        "Namespace": "AWS/SQS",
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Dimensions": [{
+          "Name": "QueueName",
+          "Value": { "Fn::GetAtt": ["JobQueue", "QueueName"] }
+        }],
+        "Statistic": "Sum",
+        "Period": "300",
+        "EvaluationPeriods": "1",
+        "Threshold": "10",
+        "ComparisonOperator": "GreaterThanThreshold",
+        "AlarmActions": [{ "Ref": "EmailNotificationTopic" }],
+        "InsufficientDataActions": [{ "Ref": "EmailNotificationTopic" }]
+      }
+    },
+
+    "InternetGateway": {
+      "Type": "AWS::EC2::InternetGateway",
+      "Properties": {
+        "Tags": [ { "Key": "Name", "Value": "nfx-vpc-igw" } ]
+      }
+    },
+    "VPC": {
+      "Type": "AWS::EC2::VPC",
+      "DependsOn": "InternetGateway",
+      "Properties": {
+        "CidrBlock": "10.0.0.0/16",
+        "EnableDnsSupport": "true",
+        "EnableDnsHostnames": "true",
+        "InstanceTenancy": "default",
+        "Tags": [ { "Key": "Name", "Value": "nfx-vpc" } ]
+      }
+    },
+    "AttachInternetGateway": {
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+      "Properties": {
+        "VpcId": { "Ref": "VPC" },
+        "InternetGatewayId": { "Ref": "InternetGateway" }
+      }
+    },
+
+    "BastionHostVPCSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "VpcId": { "Ref": "VPC" },
+        "GroupDescription": "Restricts inbound traffic from the Internet to SSH port.",
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": "22",
+            "ToPort": "22",
+            "CidrIp": "0.0.0.0/0"
+          }
+        ]
+      }
+    },
+    "SSHFromBastionSGIngress": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "GroupId": { "Fn::GetAtt": ["VPC", "DefaultSecurityGroup"] },
+        "IpProtocol": "tcp",
+        "FromPort": "22",
+        "ToPort": "22",
+        "SourceSecurityGroupId": { "Ref": "BastionHostVPCSecurityGroup" },
+      },
+      "Metadata": {
+        "Comment": "This adds an ingress rule for SSH to the default security group of the VPC."
+      }
+    },
+
+    "PublicSubnet": {
+      "Type": "AWS::EC2::Subnet",
+      "DependsOn": "PublicRouteTable",
+      "Properties": {
+        "VpcId": { "Ref": "VPC" },
+        "CidrBlock": "10.0.0.0/24",
+        "MapPublicIpOnLaunch": "true",
+        "AvailabilityZone": {
+          "Fn::Select": [ "0", { "Fn::GetAZs": { "Ref": "AWS::Region" } } ]
+        },
+        "Tags": [ { "Key": "Name", "Value": "nfx-vpc-public" } ]
+      }
+    },
+    "PublicRouteTable": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": { "Ref": "VPC" },
+        "Tags": [ { "Key": "Name", "Value": "nfx-vpc-route-table-igw" } ]
+      }
+    },
+    "PublicRouteViaInternetGateway": {
+      "Type": "AWS::EC2::Route",
+      "Properties": {
+        "RouteTableId": { "Ref": "PublicRouteTable" },
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": { "Ref": "InternetGateway" }
+      }
+    },
+    "PublicSubnetRouteTableAssociation": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "SubnetId": { "Ref": "PublicSubnet" },
+        "RouteTableId": { "Ref": "PublicRouteTable" }
+      }
+    },
+
+    "NATElasticIP": {
+      "Type": "AWS::EC2::EIP",
+      "Properties": {
+        "Domain": "vpc"
+      }
+    },
+    "NATGateway": {
+      "Type": "AWS::EC2::NatGateway",
+      "Properties": {
+        "AllocationId": { "Fn::GetAtt": ["NATElasticIP", "AllocationId"] },
+        "SubnetId": { "Ref": "PublicSubnet" }
+      }
+    },
+    "PrivateRouteTable": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": { "Ref": "VPC" },
+        "Tags": [ { "Key": "Name", "Value": "nfx-vpc-route-table-nat" } ]
+      }
+    },
+    "RouteViaNATGateway": {
+      "Type": "AWS::EC2::Route",
+      "Properties": {
+        "RouteTableId": { "Ref": "PrivateRouteTable" },
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "NatGatewayId": { "Ref": "NATGateway" }
+      }
+    },
+    "PrivateSubnet": {
+      "Type": "AWS::EC2::Subnet",
+      "DependsOn": "PrivateRouteTable",
+      "Properties": {
+        "VpcId": { "Ref": "VPC" },
+        "CidrBlock": "10.0.1.0/24",
+        "MapPublicIpOnLaunch": "false",
+        "AvailabilityZone": {
+          "Fn::Select": [ "0", { "Fn::GetAZs": { "Ref": "AWS::Region" } } ]
+        },
+        "Tags": [ { "Key": "Name", "Value": "nfx-vpc-private" } ]
+      }
+    },
+    "PrivateSubnetRouteTableAssociation": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "SubnetId": { "Ref": "PrivateSubnet" },
+        "RouteTableId": { "Ref": "PrivateRouteTable" }
+      }
+    },
+
+    "ECSCluster": {
+      "Type": "AWS::ECS::Cluster",
+      "DependsOn": "VPC",
+      "Metadata": {
+        "Comment": "Specifying a ClusterName property will fail if a _deleted_ cluster of the same name existed previously, so we don't specify it."
+      }
+    },
+    "ECSLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "RetentionInDays": "30"
+      }
+    },
+    "ECSTaskDefinition": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "DependsOn": "ECSLogGroup",
+      "Properties": {
+        "ContainerDefinitions": [{
+          "Name": "nfx-depbuilder",
+          "Cpu": "512",
+          "Memory": "960",
+          "Essential": "true",
+          "Image": {
+            "Fn::Join": [ "", [
+              { "Ref": "AWS::AccountId" },
+              ".dkr.ecr.",
+              { "Ref": "AWS::Region" },
+              ".amazonaws.com/",
+              "nfx-depbuilder:latest"
+            ] ]
+          },
+          "Environment": [
+            { "Name": "SQS_QUEUE_URL", "Value": { "Ref": "JobQueue" } }
+          ],
+          "LogConfiguration": {
+            "LogDriver": "awslogs",
+            "Options": {
+              "awslogs-region": { "Ref": "AWS::Region" },
+              "awslogs-group": { "Ref": "ECSLogGroup"},
+              "awslogs-stream-prefix": "containers"
+            }
+          }
+        }],
+        "TaskRoleArn": { "Ref": "ECSTaskRole" }
+      }
+    },
+    "ECSService": {
+      "Type": "AWS::ECS::Service",
+      "DependsOn": "ECSInstanceAutoScalingGroup",
+      "Properties": {
+        "Cluster": { "Ref": "ECSCluster" },
+        "TaskDefinition": { "Ref": "ECSTaskDefinition" },
+        "DesiredCount": 1
+      }
+    },
+
+    "ECSInstanceLaunchConfig": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Properties": {
+        "ImageId": {
+          "Fn::If": [
+            "UseDefaultAmi",
+            { "Fn::FindInMap": [ "DefaultAmiForRegion", { "Ref": "AWS::Region" }, "id" ] },
+            { "Ref": "EcsAmiId" }
+          ]
+        },
+        "InstanceType": "t2.small",
+        "KeyName": { "Ref": "KeyPair" },
+        "IamInstanceProfile": { "Ref": "ECSInstanceProfile" },
+        "SecurityGroups": [{ "Fn::GetAtt": ["VPC", "DefaultSecurityGroup"] }],
+        "AssociatePublicIpAddress": "false",
+        "InstanceMonitoring": "true",
+        "UserData": { "Fn::Base64": { "Fn::Join": ["", [
+          "#!/bin/bash\n",
+          "echo ECS_CLUSTER=", { "Ref": "ECSCluster" }, " >> /etc/ecs/ecs.config"
+        ] ] } }
+      }
+    },
+    "ECSInstanceAutoScalingGroup": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "Properties": {
+        "VPCZoneIdentifier": [ {
+          "Fn::Join": [",", [
+            { "Ref": "PrivateSubnet" }
+          ] ]
+        } ],
+        "LaunchConfigurationName": { "Ref": "ECSInstanceLaunchConfig" },
+        "MinSize": "1",
+        "MaxSize": "10",
+        "DesiredCapacity": "1",
+        "Cooldown": "5",
+        "HealthCheckType": "EC2",
+        "NotificationConfigurations": [{
+          "TopicARN": { "Ref": "EmailNotificationTopic" },
+          "NotificationTypes": [
+            "autoscaling:EC2_INSTANCE_LAUNCH",
+            "autoscaling:EC2_INSTANCE_LAUNCH_ERROR",
+            "autoscaling:EC2_INSTANCE_TERMINATE",
+            "autoscaling:EC2_INSTANCE_TERMINATE_ERROR"
+          ]
+        }],
+        "Tags": [ { "Key": "Name", "Value": "nfx-depbuilder-ecs-asg", "PropagateAtLaunch": "false" } ]
+      },
+      "UpdatePolicy": {
+        "AutoScalingRollingUpdate": {
+          "MaxBatchSize": "1",
+          "MinInstancesInService": "1"
+        }
+      }
+    },
+
+    "ECSInstanceRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": [ "ec2.amazonaws.com", "ecs.amazonaws.com" ]
+            },
+            "Action": [ "sts:AssumeRole" ]
+          }
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "ecs-service",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecs:CreateCluster",
+                    "ecs:DeregisterContainerInstance",
+                    "ecs:DiscoverPollEndpoint",
+                    "ecs:Poll",
+                    "ecs:RegisterContainerInstance",
+                    "ecs:StartTelemetrySession",
+                    "ecs:Submit*",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "ecr-readonly",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:GetAuthorizationToken",
+                    "ecr:BatchCheckLayerAvailability",
+                    "ecr:GetDownloadUrlForLayer",
+                    "ecr:GetRepositoryPolicy",
+                    "ecr:DescribeRepositories",
+                    "ecr:ListImages",
+                    "ecr:BatchGetImage"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "ECSInstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Path": "/",
+        "Roles": [{ "Ref": "ECSInstanceRole" }]
+      }
+    },
+
+    "ECSTaskRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": [ "ecs-tasks.amazonaws.com" ]
+            },
+            "Action": [ "sts:AssumeRole" ]
+          }
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "ecs-task",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:PutObject"
+                  ],
+                  "Resource": { "Fn::Join" : ["", [
+                    "arn:aws:s3:::",
+                    { "Ref" : "JobsBucket" },
+                    "/*"
+                  ] ] }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:ChangeMessageVisibility"
+                  ],
+                  "Resource": { "Fn::GetAtt": ["JobQueue", "Arn"] }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+
+  "Outputs": {
+    "LambdaBucketName": {
+      "Description": "Lambda function source code gets uploaded to this S3 bucket.",
+      "Value": { "Ref": "LambdaBucket" }
+    },
+
+    "DockerRepositoryName": {
+      "Description": "Name of repository to push the 'npm install' Docker image to.",
+      "Value": { "Ref": "DockerRepository" }
+    }
+  }
+}

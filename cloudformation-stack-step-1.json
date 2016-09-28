@@ -1,0 +1,55 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+
+  "Parameters": {
+    "LambdaBucketName": {
+      "Type": "String",
+      "Description": "Name of S3 bucket where Lambda function code will be uploaded to.",
+    },
+
+    "DockerRepositoryName": {
+      "Type": "String",
+      "Description": "Name of Docker repository where the 'npm install' Docker image will be pushed to."
+    }
+  },
+
+  "Conditions": {
+    "UserSpecifiedBucketName": { "Fn::Not": [{ "Fn::Equals": [ { "Ref": "LambdaBucketName" }, "" ] }] },
+
+    "UserSpecifiedRepositoryName": { "Fn::Not": [{ "Fn::Equals": [ { "Ref": "DockerRepositoryName" }, "" ] }] }
+  },
+
+  "Resources": {
+    "LambdaBucket": {
+      "Type": "AWS::S3::Bucket",
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "BucketName": { "Fn::If": ["UserSpecifiedBucketName", { "Ref": "LambdaBucketName" }, { "Ref": "AWS::NoValue" }] }
+      }
+    },
+
+    "DockerRepository": {
+      "Type": "AWS::ECR::Repository",
+      "Properties": {
+        "RepositoryName": { "Fn::If": ["UserSpecifiedRepositoryName", { "Ref": "DockerRepositoryName" }, { "Ref": "AWS::NoValue" }] }
+      }
+    },
+
+    "JobsBucket": {
+      "Type": "AWS::S3::Bucket",
+      "DeletionPolicy": "Delete"
+    }
+  },
+
+  "Outputs": {
+    "LambdaBucketName": {
+      "Description": "Lambda function source code gets uploaded to this S3 bucket.",
+      "Value": { "Ref": "LambdaBucket" }
+    },
+
+    "DockerRepositoryName": {
+      "Description": "Name of repository to push the 'npm install' Docker image to.",
+      "Value": { "Ref": "DockerRepository" }
+    }
+  }
+}
