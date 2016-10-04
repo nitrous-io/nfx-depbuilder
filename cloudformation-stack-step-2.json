@@ -583,6 +583,21 @@
     "DockerRepositoryName": {
       "Description": "Name of repository to push the 'npm install' Docker image to.",
       "Value": { "Ref": "DockerRepository" }
+    },
+
+    "JobQueueURL": {
+      "Description": "URL of job queue. Copy this value to the SQS_QUEUE_URL env var in env.json.",
+      "Value": { "Ref": "JobQueue" }
+    },
+
+    "ECSTaskDefinitionARN": {
+      "Description": "ARN of task definition. Copy this value to the TASK_DEF_ARN env var in env.json",
+      "Value": { "Ref": "ECSTaskDefinition" }
+    },
+
+    "ECSClusterName": {
+      "Description": "Name of ECS cluster. Copy this value to the TASK_CLUSTER_NAME env var in env.json.",
+      "Value": { "Ref": "ECSCluster" }
     }
   }
 }
