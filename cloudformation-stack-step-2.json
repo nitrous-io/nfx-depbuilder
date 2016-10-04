@@ -182,10 +182,20 @@
     },
 
     "JobQueue": {
-       "Type": "AWS::SQS::Queue",
-       "Properties": {
-         "VisibilityTimeout": "300"
-       }
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "VisibilityTimeout": "300",
+        "RedrivePolicy": {
+          "deadLetterTargetArn": { "Fn::GetAtt": [ "JobDeadLetterQueue", "Arn" ] },
+          "maxReceiveCount": 3
+        },
+      }
+    },
+    "JobDeadLetterQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "VisibilityTimeout": "300"
+      }
     },
     "JobQueueDepthAlert": {
       "Type": "AWS::CloudWatch::Alarm",
