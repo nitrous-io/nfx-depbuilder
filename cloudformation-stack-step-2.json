@@ -83,7 +83,7 @@
         "Path": "/",
         "Policies": [
           {
-            "PolicyName": "ecs-task",
+            "PolicyName": "launcher-lambda",
             "PolicyDocument": {
               "Version": "2012-10-17",
               "Statement": [
@@ -388,7 +388,8 @@
             ] ]
           },
           "Environment": [
-            { "Name": "SQS_QUEUE_URL", "Value": { "Ref": "JobQueue" } }
+            { "Name": "SQS_QUEUE_URL", "Value": { "Ref": "JobQueue" } },
+            { "Name": "RESPONSE_LOG_GROUP", "Value": { "Ref": "ECSLogGroup" } }
           ],
           "LogConfiguration": {
             "LogDriver": "awslogs",
@@ -575,6 +576,14 @@
                     "sqs:ChangeMessageVisibility"
                   ],
                   "Resource": { "Fn::GetAtt": ["JobQueue", "Arn"] }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": { "Fn::GetAtt": ["ECSLogGroup", "Arn"] }
                 }
               ]
             }
