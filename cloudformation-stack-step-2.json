@@ -384,10 +384,12 @@
               ".dkr.ecr.",
               { "Ref": "AWS::Region" },
               ".amazonaws.com/",
-              "nfx-depbuilder:latest"
+              { "Ref": "DockerRepository" },
+              ":latest"
             ] ]
           },
           "Environment": [
+            { "Name": "AWS_REGION", "Value": { "Ref": "AWS::Region" } },
             { "Name": "SQS_QUEUE_URL", "Value": { "Ref": "JobQueue" } },
             { "Name": "RESPONSE_LOG_GROUP", "Value": { "Ref": "ECSLogGroup" } }
           ],
