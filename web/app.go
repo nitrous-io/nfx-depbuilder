@@ -9,8 +9,12 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/service/sqs"
+	"github.com/aws/aws-sdk-go/service/sqs/sqsiface"
 	"github.com/nitrous-io/nfx-depbuilder/web/config"
 	"github.com/nitrous-io/nfx-depbuilder/web/filetransfer"
+	"github.com/nitrous-io/nfx-depbuilder/web/queue"
 	"github.com/pressly/chi"
 	"github.com/pressly/chi/middleware"
 	"github.com/pressly/chi/render"
@@ -33,10 +37,19 @@ const (
 )
 
 var (
-	S3 filetransfer.FileTransfer = filetransfer.NewS3()
+	S3       filetransfer.FileTransfer = filetransfer.NewS3()
+	QueueSvc sqsiface.SQSAPI
 
 	errUploadFailed = errors.New("failed to upload")
 )
+
+func init() {
+	var err error
+	QueueSvc, err = queue.New()
+	if err != nil {
+		log.Fatalf("failed to initialize queue: %v", err)
+	}
+}
 
 func AppRouter() http.Handler {
 	r := chi.NewRouter()
@@ -136,9 +149,26 @@ func createJob(w http.ResponseWriter, r *http.Request) {
 
 	// Upload package.json to S3.
 	s3key := "jobs/" + jobID + "/package.json"
-	if err := S3.Upload(config.S3Region, config.S3Bucket, s3key, &buf, "", "private"); err != nil {
+	if err := S3.Upload(config.AWSRegion, config.S3Bucket, s3key, &buf, "", "private"); err != nil {
 		log.Printf("failed to upload to S3, err: %v", err)
 		renderFatalError(w, r, errUploadFailed)
+		return
+	}
+
+	// Send message to SQS queue with S3 bucket + key.
+	msg, err := json.Marshal(map[string]string{
+		"bucket": config.S3Bucket,
+		"key":    s3key,
+	})
+	if err != nil {
+		renderFatalError(w, r, err)
+		return
+	}
+	if _, err := QueueSvc.SendMessage(&sqs.SendMessageInput{
+		MessageBody: aws.String(string(msg)),
+		QueueUrl:    aws.String(config.SQSQueueURL),
+	}); err != nil {
+		renderFatalError(w, r, err)
 		return
 	}
 

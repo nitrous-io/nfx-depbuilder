@@ -6,16 +6,20 @@ import (
 )
 
 var (
-	S3Region = os.Getenv("NFX_WEB_S3_REGION")
-	S3Bucket = os.Getenv("NFX_WEB_S3_BUCKET")
+	AWSRegion   = os.Getenv("AWS_REGION")
+	S3Bucket    = os.Getenv("NFX_WEB_S3_BUCKET")
+	SQSQueueURL = os.Getenv("NFX_WEB_SQS_QUEUE_URL")
 )
 
 func Validate() error {
-	if S3Region == "" {
-		return errors.New("NFX_WEB_S3_REGION env var is required")
+	if AWSRegion == "" {
+		return errors.New("AWS_REGION env var is required")
 	}
 	if S3Bucket == "" {
 		return errors.New("NFX_WEB_S3_BUCKET env var is required")
+	}
+	if SQSQueueURL == "" {
+		return errors.New("NFX_WEB_SQS_QUEUE_URL env var is required")
 	}
 
 	return nil

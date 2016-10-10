@@ -21,5 +21,6 @@ func main() {
 		log.Fatalf("invalid config: %v", err)
 	}
 
+	log.Printf("Starting HTTP service on %q...", addr)
 	http.ListenAndServe(addr, r)
 }

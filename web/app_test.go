@@ -16,11 +16,13 @@ import (
 
 	"github.com/nitrous-io/nfx-depbuilder/web/config"
 	"github.com/nitrous-io/nfx-depbuilder/web/filetransfer/fake"
+	"github.com/nitrous-io/nfx-depbuilder/web/queue"
 )
 
 func TestMain(m *testing.M) {
-	config.S3Region = "kl-orgrimmar-1"
+	config.AWSRegion = "kl-orgrimmar-1"
 	config.S3Bucket = "nfx-jobs"
+	config.SQSQueueURL = "https://sqs.kl-orgrimmar-1.amazonaws.test/12345/a-queue"
 
 	os.Exit(m.Run())
 }
@@ -295,11 +297,17 @@ func TestCreateJobNoDependencies(t *testing.T) {
 }
 
 func TestCreateJobAccepted(t *testing.T) {
-	// Fake S3 upload so that test runs without actually trying to upload.
+	// Fake S3 upload so that tests run without actually trying to upload.
 	origS3 := S3
 	fakeS3 := &fake.FakeTransfer{}
 	S3 = fakeS3
 	defer func() { S3 = origS3 }()
+
+	// Fake queue service.
+	origQueueSvc := QueueSvc
+	fakeQueueSvc := &queue.Fake{}
+	QueueSvc = fakeQueueSvc
+	defer func() { QueueSvc = origQueueSvc }()
 
 	r := AppRouter()
 	ts := httptest.NewServer(r)
@@ -345,10 +353,17 @@ func TestCreateJobAccepted(t *testing.T) {
 }
 
 func TestCreateJobUploadsToS3(t *testing.T) {
+	// Fake S3 upload so that tests run without actually trying to upload.
 	origS3 := S3
 	fakeS3 := &fake.FakeTransfer{}
 	S3 = fakeS3
 	defer func() { S3 = origS3 }()
+
+	// Fake queue service.
+	origQueueSvc := QueueSvc
+	fakeQueueSvc := &queue.Fake{}
+	QueueSvc = fakeQueueSvc
+	defer func() { QueueSvc = origQueueSvc }()
 
 	r := AppRouter()
 	ts := httptest.NewServer(r)
@@ -385,8 +400,8 @@ func TestCreateJobUploadsToS3(t *testing.T) {
 	call := fakeS3.UploadCalls.NthCall(1)
 	args := call.Arguments
 
-	if args[0] != config.S3Region {
-		t.Fatalf("expected S3.Upload() to be called with %v for region, but got %v", config.S3Region, args[0])
+	if args[0] != config.AWSRegion {
+		t.Fatalf("expected S3.Upload() to be called with %v for region, but got %v", config.AWSRegion, args[0])
 	}
 	if args[1] != config.S3Bucket {
 		t.Fatalf("expected S3.Upload() to be called with %v for bucket, but got %v", config.S3Bucket, args[1])
@@ -407,6 +422,67 @@ func TestCreateJobUploadsToS3(t *testing.T) {
 		t.Logf("expected content: %q", validPackageJSON)
 		t.Logf("uploaded content: %q", uploadedContent)
 		t.Fatalf("expected S3.Upload() to upload the given content but it did not")
+	}
+}
+
+func TestCreateJobSendsSQSMessage(t *testing.T) {
+	// Fake S3 upload so that tests run without actually trying to upload.
+	origS3 := S3
+	fakeS3 := &fake.FakeTransfer{}
+	S3 = fakeS3
+	defer func() { S3 = origS3 }()
+
+	// Fake queue service.
+	origQueueSvc := QueueSvc
+	fakeQueueSvc := &queue.Fake{}
+	QueueSvc = fakeQueueSvc
+	defer func() { QueueSvc = origQueueSvc }()
+
+	r := AppRouter()
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+
+	res := doMultipartRequest(t, ts.URL+"/jobs", validPackageJSON)
+
+	if res.StatusCode != http.StatusAccepted {
+		t.Errorf("expected response status to be %v but got %v",
+			http.StatusAccepted, res.StatusCode)
+	}
+
+	b := &bytes.Buffer{}
+	if _, err := b.ReadFrom(res.Body); err != nil {
+		t.Fatalf("error reading response body: %v", err)
+	}
+
+	var j struct {
+		Job struct {
+			ID    string `json:"id"`
+			State string `json:"state"`
+		} `json:"job"`
+	}
+	if err := json.Unmarshal(b.Bytes(), &j); err != nil {
+		t.Logf("response body: %q", b.String())
+		t.Fatalf("response body %q is probably invalid JSON, err: %v",
+			b.String(), err)
+	}
+
+	msgBody := *fakeQueueSvc.SendMessageInput.MessageBody
+
+	var m struct {
+		Bucket string `json:"bucket"`
+		Key    string `json:"key"`
+	}
+	if err := json.Unmarshal([]byte(msgBody), &m); err != nil {
+		t.Fatalf("error unmarshalling sent message %q, err: %v", msgBody, err)
+	}
+
+	expectedKey := fmt.Sprintf("jobs/%v/package.json", j.Job.ID)
+	if m.Key != expectedKey {
+		t.Errorf("expected message to have key of %q but got %q", expectedKey, m.Key)
+	}
+
+	if m.Bucket != config.S3Bucket {
+		t.Errorf("expected message to have bucket of %q, but got %q", config.S3Bucket, m.Bucket)
 	}
 }
 
