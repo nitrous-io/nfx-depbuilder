@@ -408,35 +408,66 @@ func TestCreateJobUploadsToS3(t *testing.T) {
 			b.String(), err)
 	}
 
-	if fakeS3.UploadCalls.Count() != 1 {
-		t.Fatalf("expected S3.Upload() to be called 1 time but was called %d times", fakeS3.UploadCalls.Count())
+	if fakeS3.UploadCalls.Count() != 2 {
+		t.Fatalf("expected S3.Upload() to be called 2 times but was called %d times", fakeS3.UploadCalls.Count())
 	}
 
-	call := fakeS3.UploadCalls.NthCall(1)
-	args := call.Arguments
+	call1 := fakeS3.UploadCalls.NthCall(1)
+	args1 := call1.Arguments
 
-	if args[0] != config.AWSRegion {
-		t.Fatalf("expected S3.Upload() to be called with %v for region, but got %v", config.AWSRegion, args[0])
+	if args1[0] != config.AWSRegion {
+		t.Fatalf("expected S3.Upload() to be called with %v for region, but got %v", config.AWSRegion, args1[0])
 	}
-	if args[1] != config.S3Bucket {
-		t.Fatalf("expected S3.Upload() to be called with %v for bucket, but got %v", config.S3Bucket, args[1])
+	if args1[1] != config.S3Bucket {
+		t.Fatalf("expected S3.Upload() to be called with %v for bucket, but got %v", config.S3Bucket, args1[1])
 	}
 	expectedKey := fmt.Sprintf("jobs/%v/package.json", j.Job.ID)
-	if args[2] != expectedKey {
-		t.Fatalf("expected S3.Upload() to be called with S3 key of %q, but got %q", expectedKey, args[2])
+	if args1[2] != expectedKey {
+		t.Fatalf("expected S3.Upload() to be called with S3 key of %q, but got %q", expectedKey, args1[2])
 	}
-	if args[4] != "" {
-		t.Fatalf("expected S3.Upload() to be called without content type, but got %q", args[4])
+	if args1[4] != "" {
+		t.Fatalf("expected S3.Upload() to be called without content type, but got %q", args1[4])
 	}
-	if args[5] != "private" {
-		t.Fatalf("expected S3.Upload() to be called with an ACL of 'private', but got %q", args[5])
+	if args1[5] != "private" {
+		t.Fatalf("expected S3.Upload() to be called with an ACL of 'private', but got %q", args1[5])
 	}
 
-	uploadedContent := string(call.SideEffects["uploaded_content"].([]byte))
+	uploadedContent := string(call1.SideEffects["uploaded_content"].([]byte))
 	if uploadedContent != validPackageJSON {
 		t.Logf("expected content: %q", validPackageJSON)
 		t.Logf("uploaded content: %q", uploadedContent)
 		t.Fatalf("expected S3.Upload() to upload the given content but it did not")
+	}
+
+	call2 := fakeS3.UploadCalls.NthCall(2)
+	args2 := call2.Arguments
+
+	if args2[0] != config.AWSRegion {
+		t.Fatalf("expected S3.Upload() to be called with %v for region, but got %v", config.AWSRegion, args2[0])
+	}
+	if args2[1] != config.S3Bucket {
+		t.Fatalf("expected S3.Upload() to be called with %v for bucket, but got %v", config.S3Bucket, args2[1])
+	}
+	expectedKey = fmt.Sprintf("jobs/%v/status.json", j.Job.ID)
+	if args2[2] != expectedKey {
+		t.Fatalf("expected S3.Upload() to be called with S3 key of %q, but got %q", expectedKey, args2[2])
+	}
+	if args2[4] != "" {
+		t.Fatalf("expected S3.Upload() to be called without content type, but got %q", args2[4])
+	}
+	if args2[5] != "private" {
+		t.Fatalf("expected S3.Upload() to be called with an ACL of 'private', but got %q", args2[5])
+	}
+
+	statusBytes := call2.SideEffects["uploaded_content"].([]byte)
+	var receivedJob Job
+	if err := json.Unmarshal(statusBytes, &receivedJob); err != nil {
+		t.Fatalf("error unmarshalling status.json, err: %v", err)
+	}
+
+	expectedJob := Job{ID: j.Job.ID, State: stateProcessing}
+	if receivedJob != expectedJob {
+		t.Fatalf("expected S3.Upload() to upload the job %#v but it got %#v instead", expectedJob, receivedJob)
 	}
 }
 

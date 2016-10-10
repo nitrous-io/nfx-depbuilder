@@ -31,6 +31,11 @@ const (
 	stateCompleted  State = "completed"
 )
 
+type Job struct {
+	ID    string `json:"id"`
+	State State  `json:"state"`
+}
+
 type packageJSON struct {
 	Dependencies map[string]string `json:"dependencies"`
 }
@@ -68,6 +73,7 @@ func AppRouter() http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
 	r.Use(middleware.CloseNotify)
 
 	r.Route("/jobs", func(r chi.Router) {
@@ -132,6 +138,7 @@ func createJob(w http.ResponseWriter, r *http.Request) {
 		break
 	}
 
+	// FIXME Use a pipe so that we don't buffer the upload into program memory.
 	var buf bytes.Buffer
 	teeRdr := io.TeeReader(pkgRdr, &buf)
 
@@ -152,24 +159,29 @@ func createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// We might want to add the user ID to the jobID when we implement
+	// authentication via Nitrous.
 	jobID, err := randomID(8)
 	if err != nil {
 		renderFatalError(w, r, err)
 		return
 	}
 
+	rgn := config.AWSRegion
+	bkt := config.S3Bucket
+
 	// Upload package.json to S3.
-	s3key := "jobs/" + jobID + "/package.json"
-	if err := S3.Upload(config.AWSRegion, config.S3Bucket, s3key, &buf, "", "private"); err != nil {
-		log.Printf("failed to upload to S3, err: %v", err)
+	pkgKey := packageJSONKey(jobID)
+	if err := S3.Upload(rgn, bkt, pkgKey, &buf, "", "private"); err != nil {
+		log.Printf("failed to upload package.json to S3, err: %v", err)
 		renderFatalError(w, r, errUploadFailed)
 		return
 	}
 
 	// Send message to SQS queue with S3 bucket + key.
 	msg, err := json.Marshal(map[string]string{
-		"bucket": config.S3Bucket,
-		"key":    s3key,
+		"bucket": bkt,
+		"key":    pkgKey,
 	})
 	if err != nil {
 		renderFatalError(w, r, err)
@@ -180,6 +192,24 @@ func createJob(w http.ResponseWriter, r *http.Request) {
 		QueueUrl:    aws.String(config.SQSQueueURL),
 	}); err != nil {
 		renderFatalError(w, r, err)
+		return
+	}
+
+	// Upload status file to S3. S3 kinda works but we can use something less
+	// primitive than regular files, like DyanomoDB.
+	sKey := statusKey(jobID)
+	job := Job{
+		ID:    jobID,
+		State: stateProcessing,
+	}
+	statusJSON, err := json.Marshal(job)
+	if err != nil {
+		renderFatalError(w, r, err)
+		return
+	}
+	if err := S3.Upload(rgn, bkt, sKey, bytes.NewReader(statusJSON), "", "private"); err != nil {
+		log.Printf("failed to upload status.json to S3, err: %v", err)
+		renderFatalError(w, r, errUploadFailed)
 		return
 	}
 
@@ -200,10 +230,7 @@ func createJob(w http.ResponseWriter, r *http.Request) {
 
 	render.Status(r, http.StatusAccepted)
 	render.JSON(w, r, map[string]interface{}{
-		"job": map[string]interface{}{
-			"id":    jobID,
-			"state": stateProcessing,
-		},
+		"job": job,
 	})
 }
 
@@ -221,4 +248,12 @@ func renderFatalError(w http.ResponseWriter, r *http.Request, err error) {
 		"help":              "your error has been logged, please contact support with your request_id",
 		"request_id":        reqID,
 	})
+}
+
+func packageJSONKey(jobID string) string {
+	return "jobs/" + jobID + "/package.json"
+}
+
+func statusKey(jobID string) string {
+	return "jobs/" + jobID + "/status.json"
 }
