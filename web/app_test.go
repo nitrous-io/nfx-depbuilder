@@ -521,11 +521,16 @@ func TestCreateJobSendsSQSMessage(t *testing.T) {
 	msgBody := *fakeQueueSvc.SendMessageInput.MessageBody
 
 	var m struct {
+		JobID  string `json:"job_id"`
 		Bucket string `json:"bucket"`
 		Key    string `json:"key"`
 	}
 	if err := json.Unmarshal([]byte(msgBody), &m); err != nil {
 		t.Fatalf("error unmarshalling sent message %q, err: %v", msgBody, err)
+	}
+
+	if m.JobID != j.Job.ID {
+		t.Errorf("expected message to have a job ID of %q but got %q", j.Job.ID, m.JobID)
 	}
 
 	expectedKey := fmt.Sprintf("jobs/%v/package.json", j.Job.ID)

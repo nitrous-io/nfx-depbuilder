@@ -180,6 +180,7 @@ func createJob(w http.ResponseWriter, r *http.Request) {
 
 	// Send message to SQS queue with S3 bucket + key.
 	msg, err := json.Marshal(map[string]string{
+		"job_id": jobID,
 		"bucket": bkt,
 		"key":    pkgKey,
 	})
