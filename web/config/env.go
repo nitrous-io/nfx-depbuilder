@@ -6,9 +6,11 @@ import (
 )
 
 var (
-	AWSRegion   = os.Getenv("AWS_REGION")
-	S3Bucket    = os.Getenv("NFX_WEB_S3_BUCKET")
-	SQSQueueURL = os.Getenv("NFX_WEB_SQS_QUEUE_URL")
+	AWSRegion         = os.Getenv("AWS_REGION")
+	S3Bucket          = os.Getenv("NFX_WEB_S3_BUCKET")
+	SQSQueueURL       = os.Getenv("NFX_WEB_SQS_QUEUE_URL")
+	TaskDefinitionARN = os.Getenv("NFX_WEB_TASK_DEF_ARN")
+	TaskClusterName   = os.Getenv("NFX_WEB_TASK_CLUSTER_NAME")
 )
 
 func Validate() error {
@@ -20,6 +22,12 @@ func Validate() error {
 	}
 	if SQSQueueURL == "" {
 		return errors.New("NFX_WEB_SQS_QUEUE_URL env var is required")
+	}
+	if TaskDefinitionARN == "" {
+		return errors.New("NFX_WEB_TASK_DEF_ARN env var is required")
+	}
+	if TaskClusterName == "" {
+		return errors.New("NFX_WEB_TASK_CLUSTER_NAME env var is required")
 	}
 
 	return nil

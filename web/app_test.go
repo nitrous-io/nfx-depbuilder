@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/nitrous-io/nfx-depbuilder/web/config"
+	"github.com/nitrous-io/nfx-depbuilder/web/containerservice"
 	"github.com/nitrous-io/nfx-depbuilder/web/filetransfer/fake"
 	"github.com/nitrous-io/nfx-depbuilder/web/queue"
 )
@@ -23,6 +24,8 @@ func TestMain(m *testing.M) {
 	config.AWSRegion = "kl-orgrimmar-1"
 	config.S3Bucket = "nfx-jobs"
 	config.SQSQueueURL = "https://sqs.kl-orgrimmar-1.amazonaws.test/12345/a-queue"
+	config.TaskDefinitionARN = "arn:aws:ecs:kl-orgrimmar-1:123:task-definition/taskdef:1"
+	config.TaskClusterName = "fake-cluster"
 
 	os.Exit(m.Run())
 }
@@ -309,6 +312,12 @@ func TestCreateJobAccepted(t *testing.T) {
 	QueueSvc = fakeQueueSvc
 	defer func() { QueueSvc = origQueueSvc }()
 
+	// Fake ECS service.
+	origECSSvc := ECSSvc
+	fakeECSSvc := &containerservice.Fake{}
+	ECSSvc = fakeECSSvc
+	defer func() { ECSSvc = origECSSvc }()
+
 	r := AppRouter()
 	ts := httptest.NewServer(r)
 	defer ts.Close()
@@ -364,6 +373,12 @@ func TestCreateJobUploadsToS3(t *testing.T) {
 	fakeQueueSvc := &queue.Fake{}
 	QueueSvc = fakeQueueSvc
 	defer func() { QueueSvc = origQueueSvc }()
+
+	// Fake ECS service.
+	origECSSvc := ECSSvc
+	fakeECSSvc := &containerservice.Fake{}
+	ECSSvc = fakeECSSvc
+	defer func() { ECSSvc = origECSSvc }()
 
 	r := AppRouter()
 	ts := httptest.NewServer(r)
@@ -438,6 +453,12 @@ func TestCreateJobSendsSQSMessage(t *testing.T) {
 	QueueSvc = fakeQueueSvc
 	defer func() { QueueSvc = origQueueSvc }()
 
+	// Fake ECS service.
+	origECSSvc := ECSSvc
+	fakeECSSvc := &containerservice.Fake{}
+	ECSSvc = fakeECSSvc
+	defer func() { ECSSvc = origECSSvc }()
+
 	r := AppRouter()
 	ts := httptest.NewServer(r)
 	defer ts.Close()
@@ -483,6 +504,45 @@ func TestCreateJobSendsSQSMessage(t *testing.T) {
 
 	if m.Bucket != config.S3Bucket {
 		t.Errorf("expected message to have bucket of %q, but got %q", config.S3Bucket, m.Bucket)
+	}
+}
+
+func TestCreateJobRunsECSTask(t *testing.T) {
+	// Fake S3 upload so that tests run without actually trying to upload.
+	origS3 := S3
+	fakeS3 := &fake.FakeTransfer{}
+	S3 = fakeS3
+	defer func() { S3 = origS3 }()
+
+	// Fake queue service.
+	origQueueSvc := QueueSvc
+	fakeQueueSvc := &queue.Fake{}
+	QueueSvc = fakeQueueSvc
+	defer func() { QueueSvc = origQueueSvc }()
+
+	// Fake ECS service.
+	origECSSvc := ECSSvc
+	fakeECSSvc := &containerservice.Fake{}
+	ECSSvc = fakeECSSvc
+	defer func() { ECSSvc = origECSSvc }()
+
+	r := AppRouter()
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+
+	if fakeECSSvc.RunTaskInput != nil {
+		t.Fatalf("expected mock ECS service to not have .RunTaskInput but it was %v", fakeECSSvc.RunTaskInput)
+	}
+
+	res := doMultipartRequest(t, ts.URL+"/jobs", validPackageJSON)
+
+	if res.StatusCode != http.StatusAccepted {
+		t.Errorf("expected response status to be %v but got %v",
+			http.StatusAccepted, res.StatusCode)
+	}
+
+	if fakeECSSvc.RunTaskInput == nil {
+		t.Fatalf("expected mock ECS service to have its .RunTaskInput set, but it was nil")
 	}
 }
 

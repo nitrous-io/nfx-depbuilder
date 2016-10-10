@@ -10,9 +10,12 @@ import (
 	"strconv"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/service/ecs"
+	"github.com/aws/aws-sdk-go/service/ecs/ecsiface"
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/aws/aws-sdk-go/service/sqs/sqsiface"
 	"github.com/nitrous-io/nfx-depbuilder/web/config"
+	"github.com/nitrous-io/nfx-depbuilder/web/containerservice"
 	"github.com/nitrous-io/nfx-depbuilder/web/filetransfer"
 	"github.com/nitrous-io/nfx-depbuilder/web/queue"
 	"github.com/pressly/chi"
@@ -34,11 +37,14 @@ type packageJSON struct {
 
 const (
 	maxUploadSize = int64(1024 * 1024 * 10) // 10 MiB
+
+	ecsStartedBy = "nfx-depbuilder-web"
 )
 
 var (
 	S3       filetransfer.FileTransfer = filetransfer.NewS3()
 	QueueSvc sqsiface.SQSAPI
+	ECSSvc   ecsiface.ECSAPI
 
 	errUploadFailed = errors.New("failed to upload")
 )
@@ -48,6 +54,11 @@ func init() {
 	QueueSvc, err = queue.New()
 	if err != nil {
 		log.Fatalf("failed to initialize queue: %v", err)
+	}
+
+	ECSSvc, err = containerservice.New()
+	if err != nil {
+		log.Fatalf("failed to initialize ECS service: %v", err)
 	}
 }
 
@@ -170,6 +181,21 @@ func createJob(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		renderFatalError(w, r, err)
 		return
+	}
+
+	// Run ECS task to handle the message we just sent to the queue.
+	if res, err := ECSSvc.RunTask(&ecs.RunTaskInput{
+		TaskDefinition: aws.String(config.TaskDefinitionARN),
+		Cluster:        aws.String(config.TaskClusterName),
+		Count:          aws.Int64(1),
+		StartedBy:      aws.String(ecsStartedBy),
+	}); err != nil {
+		renderFatalError(w, r, err)
+		return
+	} else if res != nil && len(res.Failures) > 0 {
+		// Log and continue - there will be external mechanisms to ensure that
+		// ECS tasks are started to handle messages in the SQS queue.
+		log.Printf("ECS RunTask has failure(s): %#v", res.Failures)
 	}
 
 	render.Status(r, http.StatusAccepted)
