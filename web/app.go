@@ -2,12 +2,14 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ecs"
@@ -42,6 +44,8 @@ type packageJSON struct {
 
 const (
 	maxUploadSize = int64(1024 * 1024 * 10) // 10 MiB
+
+	presignExpiryDuration = 1 * time.Minute
 
 	ecsStartedBy = "nfx-depbuilder-web"
 )
@@ -78,6 +82,12 @@ func AppRouter() http.Handler {
 
 	r.Route("/jobs", func(r chi.Router) {
 		r.Post("/", createJob)
+
+		r.Route("/:jobID", func(r chi.Router) {
+			r.Use(JobCtx)
+			r.Get("/", getJob)
+			r.Get("/result", jobResult)
+		})
 	})
 
 	return r
@@ -235,6 +245,67 @@ func createJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func getJob(w http.ResponseWriter, r *http.Request) {
+	job := r.Context().Value("job").(*Job)
+
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, map[string]interface{}{
+		"job": job,
+	})
+}
+
+func jobResult(w http.ResponseWriter, r *http.Request) {
+	job := r.Context().Value("job").(*Job)
+
+	if job.State == stateFailed {
+		render.Status(r, http.StatusNotFound)
+		render.JSON(w, r, map[string]string{
+			"error":             "not_found",
+			"error_description": "job has failed",
+		})
+		return
+	}
+
+	if job.State != stateCompleted {
+		render.Status(r, http.StatusNotFound)
+		render.JSON(w, r, map[string]string{
+			"error":             "not_found",
+			"error_description": "job has not yet completed",
+		})
+		return
+	}
+
+	rgn := config.AWSRegion
+	bkt := config.S3Bucket
+
+	rKey := resultKey(job.ID)
+
+	exists, err := S3.Exists(rgn, bkt, rKey)
+	if err != nil {
+		renderFatalError(w, r, err)
+		return
+	}
+	if !exists {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{
+			"error":             "internal_server_error",
+			"error_description": "job has completed but result is unavailable",
+		})
+		return
+	}
+
+	url, err := S3.PresignedURL(rgn, bkt, rKey, presignExpiryDuration)
+	if err != nil {
+		renderFatalError(w, r, err)
+		return
+	}
+
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, map[string]interface{}{
+		"url": url,
+	})
+}
+
 func renderFatalError(w http.ResponseWriter, r *http.Request, err error) {
 	// TODO Log the error with the request ID to a file (or a writer so we can
 	// replace it with something that logs to an AWS service).
@@ -251,10 +322,45 @@ func renderFatalError(w http.ResponseWriter, r *http.Request, err error) {
 	})
 }
 
+func JobCtx(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		jobID := chi.URLParam(r, "jobID")
+		sKey := statusKey(jobID)
+
+		var statusBuf aws.WriteAtBuffer
+		err := S3.Download(config.AWSRegion, config.S3Bucket, sKey, &statusBuf)
+		if err != nil {
+			if err == filetransfer.ErrNotFound {
+				render.Status(r, http.StatusNotFound)
+				render.JSON(w, r, map[string]string{
+					"error":             "not_found",
+					"error_description": "no such job",
+				})
+				return
+			}
+			renderFatalError(w, r, err)
+			return
+		}
+
+		var job Job
+		if err := json.Unmarshal(statusBuf.Bytes(), &job); err != nil {
+			renderFatalError(w, r, err)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), "job", &job)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 func packageJSONKey(jobID string) string {
 	return "jobs/" + jobID + "/package.json"
 }
 
 func statusKey(jobID string) string {
 	return "jobs/" + jobID + "/status.json"
+}
+
+func resultKey(jobID string) string {
+	return "jobs/" + jobID + "/artifact.zip"
 }

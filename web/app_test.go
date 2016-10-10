@@ -16,6 +16,7 @@ import (
 
 	"github.com/nitrous-io/nfx-depbuilder/web/config"
 	"github.com/nitrous-io/nfx-depbuilder/web/containerservice"
+	"github.com/nitrous-io/nfx-depbuilder/web/filetransfer"
 	"github.com/nitrous-io/nfx-depbuilder/web/filetransfer/fake"
 	"github.com/nitrous-io/nfx-depbuilder/web/queue"
 )
@@ -335,10 +336,7 @@ func TestCreateJobAccepted(t *testing.T) {
 	}
 
 	var j struct {
-		Job struct {
-			ID    string `json:"id"`
-			State string `json:"state"`
-		} `json:"job"`
+		Job Job `json:"job"`
 	}
 	if err := json.Unmarshal(b.Bytes(), &j); err != nil {
 		t.Logf("response body: %q", b.String())
@@ -580,6 +578,245 @@ func TestCreateJobRunsECSTask(t *testing.T) {
 	if fakeECSSvc.RunTaskInput == nil {
 		t.Fatalf("expected mock ECS service to have its .RunTaskInput set, but it was nil")
 	}
+}
+
+func TestGetJobDownloadsStatusFromS3(t *testing.T) {
+	// Fake S3 download so that tests run without actually trying to download.
+	origS3 := S3
+	fakeS3 := &fake.FakeTransfer{}
+	S3 = fakeS3
+	defer func() { S3 = origS3 }()
+
+	job := Job{ID: "abc123", State: stateProcessing}
+	jobJSON, err := json.Marshal(job)
+	if err != nil {
+		t.Fatalf("error JSON encoding job %#v, err: %v", job, err)
+	}
+
+	fakeS3.DownloadContent = jobJSON
+
+	r := AppRouter()
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+
+	res, err := http.Get(ts.URL + "/jobs/" + job.ID)
+	if err != nil {
+		t.Fatalf("error with GET request to endpoint: %v", err)
+	}
+
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("expected response status to be %v, but got %v",
+			http.StatusOK, res.StatusCode)
+	}
+
+	b := &bytes.Buffer{}
+	if _, err := b.ReadFrom(res.Body); err != nil {
+		t.Fatalf("error reading response body: %v", err)
+	}
+
+	var j struct {
+		Job Job `json:"job"`
+	}
+	if err := json.Unmarshal(b.Bytes(), &j); err != nil {
+		t.Logf("response body: %q", b.String())
+		t.Fatalf("response body %q is probably invalid JSON, err: %v",
+			b.String(), err)
+	}
+
+	if j.Job != job {
+		t.Errorf("expected response body to return job %#v, but got %#v",
+			job, j.Job)
+	}
+}
+
+func TestGetJobNotFound(t *testing.T) {
+	// Fake S3 download so that tests run without actually trying to download.
+	origS3 := S3
+	fakeS3 := &fake.FakeTransfer{}
+	S3 = fakeS3
+	defer func() { S3 = origS3 }()
+
+	fakeS3.DownloadError = filetransfer.ErrNotFound
+
+	r := AppRouter()
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+
+	res, err := http.Get(ts.URL + "/jobs/abc123")
+	if err != nil {
+		t.Fatalf("error with GET request to endpoint: %v", err)
+	}
+
+	if res.StatusCode != http.StatusNotFound {
+		t.Errorf("expected response status to be %v, but got %v",
+			http.StatusOK, res.StatusCode)
+	}
+
+	expectedJSON := `{
+		"error": "not_found",
+		"error_description": "no such job"
+	}`
+	matchJSON(t, res, expectedJSON)
+}
+
+func TestJobResult(t *testing.T) {
+	// Fake S3 download so that tests run without actually trying to download.
+	origS3 := S3
+	fakeS3 := &fake.FakeTransfer{}
+	S3 = fakeS3
+	defer func() { S3 = origS3 }()
+
+	job := Job{ID: "abc123", State: stateCompleted}
+	jobJSON, err := json.Marshal(job)
+	if err != nil {
+		t.Fatalf("error JSON encoding job %#v, err: %v", job, err)
+	}
+
+	fakeS3.DownloadContent = jobJSON
+	fakeS3.ExistsReturn = true
+	fakeS3.PresignedURLReturn = "https://s3-kl-orgrimmar-1.amazonaws.test/jobs/abc123/artifact.zip?foo=bar"
+
+	r := AppRouter()
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+
+	res, err := http.Get(ts.URL + "/jobs/" + job.ID + "/result")
+	if err != nil {
+		t.Fatalf("error with GET request to endpoint: %v", err)
+	}
+
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("expected response status to be %v, but got %v",
+			http.StatusOK, res.StatusCode)
+	}
+
+	b := &bytes.Buffer{}
+	if _, err := b.ReadFrom(res.Body); err != nil {
+		t.Fatalf("error reading response body: %v", err)
+	}
+
+	var j struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(b.Bytes(), &j); err != nil {
+		t.Logf("response body: %q", b.String())
+		t.Fatalf("response body %q is probably invalid JSON, err: %v",
+			b.String(), err)
+	}
+
+	if j.URL != fakeS3.PresignedURLReturn {
+		t.Errorf("expected response body to return pre-signed URL of %q, but got %q",
+			fakeS3.PresignedURLReturn, j.URL)
+	}
+}
+
+func TestJobResultReturnsNotFoundIfJobFailed(t *testing.T) {
+	// Fake S3 download so that tests run without actually trying to download.
+	origS3 := S3
+	fakeS3 := &fake.FakeTransfer{}
+	S3 = fakeS3
+	defer func() { S3 = origS3 }()
+
+	job := Job{ID: "abc123", State: stateFailed} // Failed.
+	jobJSON, err := json.Marshal(job)
+	if err != nil {
+		t.Fatalf("error JSON encoding job %#v, err: %v", job, err)
+	}
+
+	fakeS3.DownloadContent = jobJSON
+
+	r := AppRouter()
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+
+	res, err := http.Get(ts.URL + "/jobs/" + job.ID + "/result")
+	if err != nil {
+		t.Fatalf("error with GET request to endpoint: %v", err)
+	}
+
+	if res.StatusCode != http.StatusNotFound {
+		t.Errorf("expected response status to be %v, but got %v",
+			http.StatusNotFound, res.StatusCode)
+	}
+
+	expectedJSON := `{
+		"error": "not_found",
+		"error_description": "job has failed"
+	}`
+	matchJSON(t, res, expectedJSON)
+}
+
+func TestJobResultReturnsNotFoundIfJobNotComplete(t *testing.T) {
+	// Fake S3 download so that tests run without actually trying to download.
+	origS3 := S3
+	fakeS3 := &fake.FakeTransfer{}
+	S3 = fakeS3
+	defer func() { S3 = origS3 }()
+
+	job := Job{ID: "abc123", State: stateProcessing} // Still "processing".
+	jobJSON, err := json.Marshal(job)
+	if err != nil {
+		t.Fatalf("error JSON encoding job %#v, err: %v", job, err)
+	}
+
+	fakeS3.DownloadContent = jobJSON
+
+	r := AppRouter()
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+
+	res, err := http.Get(ts.URL + "/jobs/" + job.ID + "/result")
+	if err != nil {
+		t.Fatalf("error with GET request to endpoint: %v", err)
+	}
+
+	if res.StatusCode != http.StatusNotFound {
+		t.Errorf("expected response status to be %v, but got %v",
+			http.StatusNotFound, res.StatusCode)
+	}
+
+	expectedJSON := `{
+		"error": "not_found",
+		"error_description": "job has not yet completed"
+	}`
+	matchJSON(t, res, expectedJSON)
+}
+
+func TestJobResultArtifactNotFound(t *testing.T) {
+	// Fake S3 download so that tests run without actually trying to download.
+	origS3 := S3
+	fakeS3 := &fake.FakeTransfer{}
+	S3 = fakeS3
+	defer func() { S3 = origS3 }()
+
+	job := Job{ID: "abc123", State: stateCompleted}
+	jobJSON, err := json.Marshal(job)
+	if err != nil {
+		t.Fatalf("error JSON encoding job %#v, err: %v", job, err)
+	}
+
+	fakeS3.DownloadContent = jobJSON
+	fakeS3.ExistsReturn = false // Build artifact doesn't exist on S3.
+
+	r := AppRouter()
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+
+	res, err := http.Get(ts.URL + "/jobs/" + job.ID + "/result")
+	if err != nil {
+		t.Fatalf("error with GET request to endpoint: %v", err)
+	}
+
+	if res.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected response status to be %v, but got %v",
+			http.StatusInternalServerError, res.StatusCode)
+	}
+
+	expectedJSON := `{
+		"error": "internal_server_error",
+		"error_description": "job has completed but result is unavailable"
+	}`
+	matchJSON(t, res, expectedJSON)
 }
 
 const validPackageJSON = `{
