@@ -1,6 +1,7 @@
 package filetransfer
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"time"
@@ -12,8 +13,11 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 )
 
-type S3 struct {
-}
+var (
+	ErrNotFound = errors.New("not found")
+)
+
+type S3 struct{}
 
 func NewS3() *S3 {
 	return &S3{}
@@ -49,6 +53,13 @@ func (s *S3) Download(region, bucket, key string, out io.WriterAt) error {
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})
+
+	if e, ok := err.(awserr.Error); ok {
+		if e.Code() == "NoSuchKey" {
+			return ErrNotFound
+		}
+	}
+
 	return err
 }
 
