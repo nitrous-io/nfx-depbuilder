@@ -3,7 +3,9 @@ const fs = require('fs'),
       spawn = require('child_process').spawn,
       readline = require('readline'),
       aws = require('aws-sdk'),
-      tmp = require('tmp');
+      tmp = require('tmp'),
+      archiver = require('archiver'),
+      async = require('async');
 
 const processNextMessage = () => {
   aws.config.region = process.env.AWS_REGION;
@@ -12,49 +14,75 @@ const processNextMessage = () => {
         s3 = new aws.S3({ apiVersion: '2006-03-01' }),
         cloudwatchlogs = new aws.CloudWatchLogs({ apiVersion: '2014-03-28' });;
 
-  const params = {
-    QueueUrl: process.env.SQS_QUEUE_URL,
-    AttributeNames: ['All'],
-    MaxNumberOfMessages: 1,
-    WaitTimeSeconds: 20 // 20 seconds is the max allowed by AWS.
-  }
-  sqs.receiveMessage(params, (err, data) => {
-    if (err) {
-      throw('Error receiving message from queue:' + err);
-    }
+  var bucket, receiptHandle;
 
-    if (!data.Messages) {
-      console.warn(`No messages in queue, exiting.`)
-      process.exit(0)
-    }
+  async.waterfall([
+    (next) => {
+      const params = {
+        QueueUrl: process.env.SQS_QUEUE_URL,
+        AttributeNames: ['All'],
+        MaxNumberOfMessages: 1,
+        WaitTimeSeconds: 20 // 20 seconds is the max allowed by AWS.
+      }
+      sqs.receiveMessage(params, (err, data) => {
+        if (err) {
+          return next(err);
+        }
 
-    const msg = data.Messages[0],
-          receiptHandle = msg.ReceiptHandle;
-    console.log('Received message:', msg);
+        if (!data.Messages) {
+          return next(new Error('No messages in queue'));
+        }
 
-    const b = JSON.parse(msg.Body),
-          bucket = b.bucket,
-          key = b.key,
-          jobId = `${key}-${Date.now()}`;
+        next(null, data.Messages[0]);
+      });
+    },
+    (msg, next) => {
+      console.log('Processing message:', msg);
 
-    console.log(`Processing new job from S3 bucket '${bucket}' with key '${key}', job ID: '${jobId}'...`);
+      const b = JSON.parse(msg.Body),
+            jobId = b.job_id,
+            key = b.key;
 
-    const tmpDir = tmp.dirSync();
-    console.log(`Created temporary directory at '${tmpDir.name}'`);
-    const pkgJsonPath = path.join(tmpDir.name, 'package.json');
-    const ws = fs.createWriteStream(pkgJsonPath);
+      bucket = b.bucket;
+      receiptHandle = msg.ReceiptHandle;
 
-    const pipe = s3.getObject({ Bucket: bucket, Key: key })
-      .createReadStream().pipe(ws);
-    pipe.on('finish', () => {
-      console.log(`Saved package.json locally at '${pkgJsonPath}'`);
+      if (!jobId) {
+        return next(new Error('Message has no job ID: ' + msg));
+      }
 
-      const logPath = path.join(tmpDir.name, 'npm-install.log'),
+      console.log(`Processing new job from S3 bucket '${bucket}' with key '${key}', job ID: '${jobId}'...`);
+
+      s3.getObject({ Bucket: bucket, Key: key }, (err, data) => {
+        if (err) {
+          return next(err);
+        }
+
+        const contents = data.Body.toString();
+
+        next(null, jobId, contents);
+      });
+    },
+    (jobId, contents, next) => {
+      const workDir = tmp.dirSync();
+      console.log(`Created temporary directory at '${workDir.name}'`);
+      const pkgJsonPath = path.join(workDir.name, 'package.json');
+      fs.writeFile(pkgJsonPath, contents, (err) => {
+        if (err) {
+          return next(err);
+        }
+
+        console.log(`Saved package.json locally at '${pkgJsonPath}'`);
+
+        next(null, jobId, workDir);
+      });
+    },
+    (jobId, workDir, next) => {
+      const logPath = path.join(workDir.name, 'npm-install.log'),
             logStream = fs.createWriteStream(logPath, { flags: 'a+' });
 
       console.log('Running npm install...');
       const npmInstall = spawn('npm', ['install', '--production'], {
-        cwd: tmpDir.name,
+        cwd: workDir.name,
         shell: '/bin/bash',
         stdio: ['ignore', 'pipe', 'pipe']
       });
@@ -84,19 +112,86 @@ const processNextMessage = () => {
         console.log('npm install exited with code:', code);
         logStream.end();
 
-        if (code === 0) {
-          // Delete message from queue (indicates that job was successfully
-          // processed).
-          const params = {
-            ReceiptHandle: receiptHandle,
-            QueueUrl: process.env.SQS_QUEUE_URL
-          };
-          sqs.deleteMessage(params, (err, data) => {
-            if (err) {
-              console.warn(`Error deleting message ${msg.MessageId} from queue: ${err}`)
-            }
-          });
+        if (code !== 0) {
+          throw('npm install failed with exit code:' + code);
         }
+
+        // Zip up node_modules/ directory and upload to S3.
+        const zipPath = path.join(workDir.name, 'artifact.zip'),
+              zipStream = fs.createWriteStream(zipPath),
+              archive = archiver('zip');
+
+        archive.on('end', () => {
+          console.log('zip file created at', zipPath, ', size:', archive.pointer(), 'bytes');
+
+          async.waterfall([
+            (next) => {
+              // Upload result zipfile to S3.
+              const resultKey = getResultKey(jobId);
+              const params = {
+                Bucket: bucket,
+                Key: resultKey,
+                Body: fs.createReadStream(zipPath)
+              };
+              s3.putObject(params, (err, data) => {
+                if (err) {
+                  console.warn('Error uploading job result to S3:', err);
+                } else {
+                  console.log('Uploaded', zipPath, 'to S3 with key', resultKey);
+                }
+
+                next(err)
+              });
+            },
+            (next) => {
+              // Update job's status.json with a "state" of "completed".
+              const statusKey = `jobs/${jobId}/status.json`;
+              const statusBody = JSON.stringify({
+                id: jobId,
+                state: 'completed'
+              });
+
+              const params = { Bucket: bucket, Key: statusKey, Body: statusBody };
+              s3.putObject(params, (err, data) => {
+                if (err) {
+                  console.warn(`Error updating job status on S3: ${err}`);
+                } else {
+                  console.log('Updated job status to completed on S3');
+                }
+
+                next(err);
+              });
+            },
+            (next) => {
+              // Delete message from queue (indicates that job was
+              // successfully processed).
+              const params = {
+                ReceiptHandle: receiptHandle,
+                QueueUrl: process.env.SQS_QUEUE_URL
+              };
+              sqs.deleteMessage(params, (err, data) => {
+                if (err) {
+                  console.warn(`Error deleting message ${msg.MessageId} from queue: ${err}`);
+                }
+
+                next(err);
+              });
+            }
+          ], (err) => {
+            if (err) {
+              throw(err);
+            }
+          })
+        });
+
+        archive.on('error', (err) => {
+          console.warn('Error zipping up build directory:', err);
+          return next(err);
+        });
+
+        archive.pipe(zipStream)
+        archive.directory(path.join(workDir.name, 'node_modules'), '/node_modules')
+        archive.finalize();
 
         // Wait for remaining logs (if any) to be pushed to CloudWatch logs.
         const timer = setInterval(() => {
@@ -112,10 +207,8 @@ const processNextMessage = () => {
       });
 
       npmInstall.on('error', (err) => {
-        throw('Error starting npm install:', err);
-
-        // TODO Record and signal error, e.g. so that we get alerted via a
-        // CloudWatch alarm.
+        console.warn('Error starting npm install:', err);
+        return next(err);
       });
 
       const logStreamName = generateLogStreamName(jobId);
@@ -164,12 +257,20 @@ const processNextMessage = () => {
           });
         }, 500);
       });
-    });
-  });
+    }
+  ], (err) => {
+    if (err) {
+      throw(err);
+    }
+  })
 };
 
 function generateLogStreamName(jobId) {
   return `npm-install-log/${jobId}`;
+}
+
+function getResultKey(jobId) {
+  return `jobs/${jobId}/artifact.zip`;
 }
 
 if (require.main === module) {
