@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
+	"github.com/aws/aws-sdk-go/service/cloudwatchlogs/cloudwatchlogsiface"
 	"github.com/aws/aws-sdk-go/service/ecs"
 	"github.com/aws/aws-sdk-go/service/ecs/ecsiface"
 	"github.com/aws/aws-sdk-go/service/sqs"
@@ -19,6 +21,7 @@ import (
 	"github.com/nitrous-io/nfx-depbuilder/web/config"
 	"github.com/nitrous-io/nfx-depbuilder/web/containerservice"
 	"github.com/nitrous-io/nfx-depbuilder/web/filetransfer"
+	"github.com/nitrous-io/nfx-depbuilder/web/logservice"
 	"github.com/nitrous-io/nfx-depbuilder/web/queue"
 	"github.com/pressly/chi"
 	"github.com/pressly/chi/middleware"
@@ -51,9 +54,10 @@ const (
 )
 
 var (
-	S3       filetransfer.FileTransfer = filetransfer.NewS3()
-	QueueSvc sqsiface.SQSAPI
-	ECSSvc   ecsiface.ECSAPI
+	S3                filetransfer.FileTransfer = filetransfer.NewS3()
+	QueueSvc          sqsiface.SQSAPI
+	ECSSvc            ecsiface.ECSAPI
+	CloudWatchLogsSvc cloudwatchlogsiface.CloudWatchLogsAPI
 
 	errUploadFailed = errors.New("failed to upload")
 )
@@ -68,6 +72,11 @@ func init() {
 	ECSSvc, err = containerservice.New()
 	if err != nil {
 		log.Fatalf("failed to initialize ECS service: %v", err)
+	}
+
+	CloudWatchLogsSvc, err = logservice.New()
+	if err != nil {
+		log.Fatalf("failed to initialize CloudWatch Logs service: %v", err)
 	}
 }
 
@@ -86,6 +95,7 @@ func AppRouter() http.Handler {
 		r.Route("/:jobID", func(r chi.Router) {
 			r.Use(JobCtx)
 			r.Get("/", getJob)
+			r.Get("/logs", jobLogs)
 			r.Get("/result", jobResult)
 		})
 	})
@@ -254,6 +264,46 @@ func getJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type logEvent struct {
+	Message   string `json:"message"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+// TODO This endpoint should probably support a streaming response either via
+// HTTP long polling, Server-Sent Events or WebSockets.
+// TODO When streaming response, also periodically poll the job state to see if
+// it's "completed", then terminate the response stream.
+func jobLogs(w http.ResponseWriter, r *http.Request) {
+	job := r.Context().Value("job").(*Job)
+
+	params := &cloudwatchlogs.GetLogEventsInput{
+		LogGroupName:  aws.String(config.ResponseLogGroup),
+		LogStreamName: aws.String(logStreamName(job.ID)),
+	}
+
+	if nextToken := r.FormValue("nextToken"); nextToken != "" {
+		params.NextToken = aws.String(nextToken)
+	}
+
+	res, err := CloudWatchLogsSvc.GetLogEvents(params)
+	if err != nil {
+		renderFatalError(w, r, err)
+		return
+	}
+
+	// Convert AWS SDK events to our log type.
+	logs := make([]logEvent, 0, len(res.Events))
+	for _, evt := range res.Events {
+		logs = append(logs, logEvent{Message: *evt.Message, Timestamp: *evt.Timestamp})
+	}
+
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, map[string]interface{}{
+		"logs":       logs,
+		"next_token": res.NextForwardToken,
+	})
+}
+
 func jobResult(w http.ResponseWriter, r *http.Request) {
 	job := r.Context().Value("job").(*Job)
 
@@ -363,4 +413,8 @@ func statusKey(jobID string) string {
 
 func resultKey(jobID string) string {
 	return "jobs/" + jobID + "/artifact.zip"
+}
+
+func logStreamName(jobID string) string {
+	return "npm-install-log/" + jobID
 }

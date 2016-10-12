@@ -11,6 +11,7 @@ var (
 	SQSQueueURL       = os.Getenv("NFX_WEB_SQS_QUEUE_URL")
 	TaskDefinitionARN = os.Getenv("NFX_WEB_TASK_DEF_ARN")
 	TaskClusterName   = os.Getenv("NFX_WEB_TASK_CLUSTER_NAME")
+	ResponseLogGroup  = os.Getenv("NFX_WEB_RESPONSE_LOG_GROUP")
 )
 
 func Validate() error {
@@ -28,6 +29,9 @@ func Validate() error {
 	}
 	if TaskClusterName == "" {
 		return errors.New("NFX_WEB_TASK_CLUSTER_NAME env var is required")
+	}
+	if ResponseLogGroup == "" {
+		return errors.New("NFX_WEB_RESPONSE_LOG_GROUP env var is required")
 	}
 
 	return nil

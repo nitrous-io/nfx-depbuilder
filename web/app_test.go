@@ -14,10 +14,12 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
 	"github.com/nitrous-io/nfx-depbuilder/web/config"
 	"github.com/nitrous-io/nfx-depbuilder/web/containerservice"
 	"github.com/nitrous-io/nfx-depbuilder/web/filetransfer"
 	"github.com/nitrous-io/nfx-depbuilder/web/filetransfer/fake"
+	"github.com/nitrous-io/nfx-depbuilder/web/logservice"
 	"github.com/nitrous-io/nfx-depbuilder/web/queue"
 )
 
@@ -817,6 +819,188 @@ func TestJobResultArtifactNotFound(t *testing.T) {
 		"error_description": "job has completed but result is unavailable"
 	}`
 	matchJSON(t, res, expectedJSON)
+}
+
+func TestJobLogsGetsLogsFromCloudWatchLogs(t *testing.T) {
+	// Fake S3 download so that tests run without actually trying to download.
+	origS3 := S3
+	fakeS3 := &fake.FakeTransfer{}
+	S3 = fakeS3
+	defer func() { S3 = origS3 }()
+
+	job := Job{ID: "abc123", State: stateProcessing}
+	jobJSON, err := json.Marshal(job)
+	if err != nil {
+		t.Fatalf("error JSON encoding job %#v, err: %v", job, err)
+	}
+	fakeS3.DownloadContent = jobJSON
+
+	origCloudWatchLogsSvc := CloudWatchLogsSvc
+	fakeCloudWatchLogsSvc := &logservice.Fake{}
+	CloudWatchLogsSvc = fakeCloudWatchLogsSvc
+	defer func() { CloudWatchLogsSvc = origCloudWatchLogsSvc }()
+
+	var (
+		e1IngestionTime = int64(1476091254847)
+		e1Timestamp     = int64(1476091254464)
+		e1Message       = "async@2.0.1 node_modules/async"
+		e2IngestionTime = int64(1476091257864)
+		e2Timestamp     = int64(1476091257345)
+		e2Message       = "└── lodash@4.16.4"
+		fwdToken        = "f/xyzforwardtoken"
+		bckToken        = "b/zyxbackwardtoken"
+	)
+	fakeCloudWatchLogsSvc.GetLogEventsOutput = &cloudwatchlogs.GetLogEventsOutput{
+		Events: []*cloudwatchlogs.OutputLogEvent{
+			{
+				IngestionTime: &e1IngestionTime,
+				Timestamp:     &e1Timestamp,
+				Message:       &e1Message,
+			},
+			{
+				IngestionTime: &e2IngestionTime,
+				Timestamp:     &e2Timestamp,
+				Message:       &e2Message,
+			},
+		},
+		NextForwardToken:  &fwdToken,
+		NextBackwardToken: &bckToken,
+	}
+
+	r := AppRouter()
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+
+	res, err := http.Get(ts.URL + "/jobs/" + job.ID + "/logs")
+	if err != nil {
+		t.Fatalf("error with GET request to endpoint: %v", err)
+	}
+
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("expected response status to be %v, but got %v",
+			http.StatusOK, res.StatusCode)
+	}
+
+	b := &bytes.Buffer{}
+	if _, err := b.ReadFrom(res.Body); err != nil {
+		t.Fatalf("error reading response body: %v", err)
+	}
+
+	var j struct {
+		Logs      []logEvent `json:"logs"`
+		NextToken string     `json:"next_token"`
+	}
+	if err := json.Unmarshal(b.Bytes(), &j); err != nil {
+		t.Logf("response body: %q", b.String())
+		t.Fatalf("response body %q is probably invalid JSON, err: %v",
+			b.String(), err)
+	}
+
+	if j.NextToken != fwdToken {
+		t.Errorf("expected next_token to be %q but got %q",
+			fwdToken, j.NextToken)
+	}
+
+	if len(j.Logs) != 2 {
+		t.Errorf("expected 2 logs but got %d", len(j.Logs))
+	}
+
+	if j.Logs[0].Message != e1Message {
+		t.Errorf("expected first log message to be %q but got %q",
+			e1Message, j.Logs[0].Message)
+	}
+
+	if j.Logs[0].Timestamp != e1Timestamp {
+		t.Errorf("expected first log timestamp to be %v but got %v",
+			e1Timestamp, j.Logs[0].Timestamp)
+	}
+
+	if j.Logs[1].Message != e2Message {
+		t.Errorf("expected second log message to be %q but got %q",
+			e2Message, j.Logs[1].Message)
+	}
+
+	if j.Logs[1].Timestamp != e2Timestamp {
+		t.Errorf("expected second log timestamp to be %v but got %v",
+			e2Timestamp, j.Logs[1].Timestamp)
+	}
+
+	input := fakeCloudWatchLogsSvc.GetLogEventsInput
+	if *input.LogGroupName != config.ResponseLogGroup {
+		t.Errorf("expected log group name used to be %q but got %q",
+			config.ResponseLogGroup, *input.LogGroupName)
+	}
+	expectedLogStreamName := "npm-install-log/" + job.ID
+	if *input.LogStreamName != expectedLogStreamName {
+		t.Errorf("expected log stream name used to be %q but got %q",
+			expectedLogStreamName, *input.LogStreamName)
+	}
+}
+
+func TestJobLogsNextTokenParam(t *testing.T) {
+	// Fake S3 download so that tests run without actually trying to download.
+	origS3 := S3
+	fakeS3 := &fake.FakeTransfer{}
+	S3 = fakeS3
+	defer func() { S3 = origS3 }()
+
+	job := Job{ID: "abc123", State: stateProcessing}
+	jobJSON, err := json.Marshal(job)
+	if err != nil {
+		t.Fatalf("error JSON encoding job %#v, err: %v", job, err)
+	}
+	fakeS3.DownloadContent = jobJSON
+
+	origCloudWatchLogsSvc := CloudWatchLogsSvc
+	fakeCloudWatchLogsSvc := &logservice.Fake{}
+	CloudWatchLogsSvc = fakeCloudWatchLogsSvc
+	defer func() { CloudWatchLogsSvc = origCloudWatchLogsSvc }()
+
+	var (
+		fwdToken = "f/xyzforwardtoken"
+		bckToken = "b/zyxbackwardtoken"
+	)
+	fakeCloudWatchLogsSvc.GetLogEventsOutput = &cloudwatchlogs.GetLogEventsOutput{
+		Events:            []*cloudwatchlogs.OutputLogEvent{},
+		NextForwardToken:  &fwdToken,
+		NextBackwardToken: &bckToken,
+	}
+
+	r := AppRouter()
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+
+	u, err := url.Parse(ts.URL + "/jobs/" + job.ID + "/logs")
+	if err != nil {
+		t.Fatalf("error parsing URL: %v", err)
+	}
+
+	params := url.Values{}
+	nextToken := "some-token"
+	params.Add("nextToken", nextToken)
+
+	u.RawQuery = params.Encode()
+
+	req, err := http.NewRequest("GET", u.String(), nil)
+	if err != nil {
+		t.Fatalf("error creating request: %v", err)
+	}
+
+	if _, err := http.DefaultClient.Do(req); err != nil {
+		t.Fatalf("error making multipart request: %v", err)
+	}
+
+	input := fakeCloudWatchLogsSvc.GetLogEventsInput
+	if input == nil {
+		t.Fatal("expected GetLogEvents() to be called with some input but it was nil")
+	}
+	if input.NextToken == nil {
+		t.Fatalf("expected nextToken param to be %q but it was nil", nextToken)
+	}
+	if *input.NextToken != nextToken {
+		t.Fatalf("expected nextToken param to be %q but it was %q",
+			nextToken, *input.NextToken)
+	}
 }
 
 const validPackageJSON = `{
