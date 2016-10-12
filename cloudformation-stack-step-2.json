@@ -37,7 +37,11 @@
   },
 
   "Resources": {
-    "DockerRepository": {
+    "BuilderDockerRepository": {
+      "Type": "AWS::ECR::Repository"
+    },
+
+    "WebDockerRepository": {
       "Type": "AWS::ECR::Repository"
     },
 
@@ -489,9 +493,14 @@
   },
 
   "Outputs": {
-    "DockerRepository": {
+    "BuilderDockerRepositoryName": {
       "Description": "Name of repository to push the 'npm install' Docker image to.",
-      "Value": { "Ref": "DockerRepository" }
+      "Value": { "Ref": "BuilderDockerRepository" }
+    },
+
+    "WebDockerRepositoryName": {
+      "Description": "Name of repository to push the web server Docker image to.",
+      "Value": { "Ref": "WebDockerRepository" }
     },
 
     "JobQueueURL": {

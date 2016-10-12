@@ -2,20 +2,24 @@
   "AWSTemplateFormatVersion": "2010-09-09",
 
   "Resources": {
-    "DockerRepository": {
+    "BuilderDockerRepository": {
       "Type": "AWS::ECR::Repository"
     },
 
-    "JobsBucket": {
-      "Type": "AWS::S3::Bucket",
-      "DeletionPolicy": "Delete"
+    "WebDockerRepository": {
+      "Type": "AWS::ECR::Repository"
     }
   },
 
   "Outputs": {
-    "DockerRepository": {
+    "BuilderDockerRepositoryName": {
       "Description": "Name of repository to push the 'npm install' Docker image to.",
-      "Value": { "Ref": "DockerRepository" }
+      "Value": { "Ref": "BuilderDockerRepository" }
+    },
+
+    "WebDockerRepositoryName": {
+      "Description": "Name of repository to push the web server Docker image to.",
+      "Value": { "Ref": "WebDockerRepository" }
     }
   }
 }
