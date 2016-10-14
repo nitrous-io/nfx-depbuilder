@@ -155,7 +155,7 @@
       }
     },
 
-    "PublicSubnet": {
+    "PublicSubnet1": {
       "Type": "AWS::EC2::Subnet",
       "DependsOn": "PublicRouteTable",
       "Properties": {
@@ -164,6 +164,20 @@
         "MapPublicIpOnLaunch": "true",
         "AvailabilityZone": {
           "Fn::Select": [ "0", { "Fn::GetAZs": { "Ref": "AWS::Region" } } ]
+        },
+        "Tags": [ { "Key": "Name", "Value": "nfx-vpc-public" } ]
+      }
+    },
+
+    "PublicSubnet2": {
+      "Type": "AWS::EC2::Subnet",
+      "DependsOn": "PublicRouteTable",
+      "Properties": {
+        "VpcId": { "Ref": "VPC" },
+        "CidrBlock": "10.0.2.0/24",
+        "MapPublicIpOnLaunch": "true",
+        "AvailabilityZone": {
+          "Fn::Select": [ "1", { "Fn::GetAZs": { "Ref": "AWS::Region" } } ]
         },
         "Tags": [ { "Key": "Name", "Value": "nfx-vpc-public" } ]
       }
@@ -178,6 +192,7 @@
     },
 
     "PublicRouteViaInternetGateway": {
+      "DependsOn": "AttachInternetGateway",
       "Type": "AWS::EC2::Route",
       "Properties": {
         "RouteTableId": { "Ref": "PublicRouteTable" },
@@ -186,10 +201,18 @@
       }
     },
 
-    "PublicSubnetRouteTableAssociation": {
+    "PublicSubnetRouteTableAssociation1": {
       "Type": "AWS::EC2::SubnetRouteTableAssociation",
       "Properties": {
-        "SubnetId": { "Ref": "PublicSubnet" },
+        "SubnetId": { "Ref": "PublicSubnet1" },
+        "RouteTableId": { "Ref": "PublicRouteTable" }
+      }
+    },
+
+    "PublicSubnetRouteTableAssociation2": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "SubnetId": { "Ref": "PublicSubnet2" },
         "RouteTableId": { "Ref": "PublicRouteTable" }
       }
     },
@@ -205,7 +228,7 @@
       "Type": "AWS::EC2::NatGateway",
       "Properties": {
         "AllocationId": { "Fn::GetAtt": ["NATElasticIP", "AllocationId"] },
-        "SubnetId": { "Ref": "PublicSubnet" }
+        "SubnetId": { "Ref": "PublicSubnet1" }
       }
     },
 
@@ -263,12 +286,12 @@
       }
     },
 
-    "ECSTaskDefinition": {
+    "ECSBuilderServiceTaskDefinition": {
       "Type": "AWS::ECS::TaskDefinition",
       "DependsOn": "ECSLogGroup",
       "Properties": {
         "ContainerDefinitions": [{
-          "Name": "nfx-depbuilder",
+          "Name": "nfx-builderservice",
           "Cpu": "512",
           "Memory": "960",
           "Essential": "true",
@@ -278,7 +301,7 @@
               ".dkr.ecr.",
               { "Ref": "AWS::Region" },
               ".amazonaws.com/",
-              { "Ref": "DockerRepository" },
+              { "Ref": "BuilderDockerRepository" },
               ":latest"
             ] ]
           },
@@ -292,7 +315,7 @@
             "Options": {
               "awslogs-region": { "Ref": "AWS::Region" },
               "awslogs-group": { "Ref": "ECSLogGroup"},
-              "awslogs-stream-prefix": "containers"
+              "awslogs-stream-prefix": "builder"
             }
           }
         }],
@@ -300,13 +323,109 @@
       }
     },
 
-    "ECSService": {
+    "ECSBuilderService": {
       "Type": "AWS::ECS::Service",
       "DependsOn": "ECSInstanceAutoScalingGroup",
       "Properties": {
         "Cluster": { "Ref": "ECSCluster" },
-        "TaskDefinition": { "Ref": "ECSTaskDefinition" },
+        "TaskDefinition": { "Ref": "ECSBuilderServiceTaskDefinition" },
         "DesiredCount": 1
+      }
+    },
+
+    "ECSWebServiceTaskDefinition": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "DependsOn": "ECSLogGroup",
+      "Properties": {
+        "ContainerDefinitions": [{
+          "Name": "nfx-webservice",
+          "Cpu": "512",
+          "Memory": "960",
+          "Essential": "true",
+          "Image": {
+            "Fn::Join": [ "", [
+              { "Ref": "AWS::AccountId" },
+              ".dkr.ecr.",
+              { "Ref": "AWS::Region" },
+              ".amazonaws.com/",
+              { "Ref": "WebDockerRepository" },
+              ":latest"
+            ] ]
+          },
+          "PortMappings": [
+            { "ContainerPort": "80" }
+          ],
+          "LogConfiguration": {
+            "LogDriver": "awslogs",
+            "Options": {
+              "awslogs-region": { "Ref": "AWS::Region" },
+              "awslogs-group": { "Ref": "ECSLogGroup"},
+              "awslogs-stream-prefix": "web"
+            }
+          }
+        }],
+        "TaskRoleArn": { "Ref": "ECSTaskRole" }
+      }
+    },
+
+    "ECSWebService": {
+      "Type": "AWS::ECS::Service",
+      "DependsOn": "ECSInstanceAutoScalingGroup",
+      "Properties": {
+        "Cluster": { "Ref": "ECSCluster" },
+        "DesiredCount": 1,
+        "TaskDefinition": { "Ref": "ECSWebServiceTaskDefinition" },
+        "LoadBalancers" : [{
+          "TargetGroupArn" : { "Ref" : "ALBTargetGroup" },
+          "ContainerPort" : "80",
+          "ContainerName" : "nfx-webservice"
+        }],
+        "DesiredCount": 1,
+        "Role" : { "Ref":"ECSWebServiceRole" }
+      }
+    },
+
+    "ECSWebServiceRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "ecs.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "ecs-service",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:AuthorizeSecurityGroupIngress",
+                    "ec2:Describe*",
+                    "elasticloadbalancing:DeregisterInstancesFromLoadBalancer",
+                    "elasticloadbalancing:Describe*",
+                    "elasticloadbalancing:RegisterInstancesWithLoadBalancer",
+                    "elasticloadbalancing:DeregisterTargets",
+                    "elasticloadbalancing:RegisterTargets"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
       }
     },
 
@@ -489,6 +608,72 @@
           }
         ]
       }
+    },
+
+    "ALBSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "VpcId": { "Ref": "VPC" },
+        "GroupDescription": "Allow http from public",
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": "80",
+            "ToPort": "80",
+            "CidrIp": "0.0.0.0/0"
+          }
+        ]
+      }
+    },
+
+    "TrafficFromALBSGIngress": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "GroupId": { "Fn::GetAtt": ["VPC", "DefaultSecurityGroup"] },
+        "IpProtocol": "tcp",
+        "FromPort": "32768",
+        "ToPort": "65535",
+        "SourceSecurityGroupId": { "Ref": "ALBSecurityGroup" }
+      },
+      "Metadata": {
+        "Comment": "Allows access to ephemeral port range on the EC2 instances."
+      }
+    },
+
+    "ALB": {
+      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      "Properties": {
+        "Name": "nfx-depbuilder-alb",
+        "Subnets": [ { "Ref": "PublicSubnet1" }, { "Ref" : "PublicSubnet2" } ],
+        "SecurityGroups": [ { "Ref": "ALBSecurityGroup" } ],
+        "Tags": [ { "Key": "Name", "Value": "nfx-loadbalancer" } ]
+      }
+    },
+
+    "ALBTargetGroup": {
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties": {
+        "HealthCheckIntervalSeconds": 60,
+        "UnhealthyThresholdCount": 10,
+        "HealthCheckPath": "/",
+        "Name": "nfx-depbuilder-tg",
+        "Port": 80,
+        "Protocol": "HTTP",
+        "VpcId": { "Ref": "VPC" }
+      }
+    },
+
+    "ALBListener": {
+      "Type": "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties": {
+        "DefaultActions": [{
+          "Type": "forward",
+          "TargetGroupArn": { "Ref" : "ALBTargetGroup" }
+        }],
+        "LoadBalancerArn": { "Ref" : "ALB" },
+        "Port": "80",
+        "Protocol": "HTTP"
+      }
     }
   },
 
@@ -506,11 +691,6 @@
     "JobQueueURL": {
       "Description": "URL of job queue. Copy this value to the SQS_QUEUE_URL env var in env.json.",
       "Value": { "Ref": "JobQueue" }
-    },
-
-    "ECSTaskDefinitionARN": {
-      "Description": "ARN of task definition. Copy this value to the TASK_DEF_ARN env var in env.json",
-      "Value": { "Ref": "ECSTaskDefinition" }
     },
 
     "ECSClusterName": {
