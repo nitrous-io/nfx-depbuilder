@@ -77,11 +77,11 @@ const processNextMessage = () => {
       });
     },
     (jobId, workDir, next) => {
-      const logPath = path.join(workDir.name, 'npm-install.log'),
+      const logPath = path.join(workDir.name, 'yarn-install.log'),
             logStream = fs.createWriteStream(logPath, { flags: 'a+' });
 
-      console.log('Running npm install...');
-      const npmInstall = spawn('npm', ['install', '--production'], {
+      console.log('Running yarn install...');
+      const yarnInstall = spawn('yarn', ['install', '--production'], {
         cwd: workDir.name,
         shell: '/bin/bash',
         stdio: ['ignore', 'pipe', 'pipe']
@@ -89,10 +89,10 @@ const processNextMessage = () => {
 
       // Send stdout/stderr to both the parent process' stdout/stderr and to a
       // regular file.
-      npmInstall.stdout.pipe(logStream);
-      npmInstall.stdout.pipe(process.stdout);
-      npmInstall.stderr.pipe(logStream);
-      npmInstall.stderr.pipe(process.stderr);
+      yarnInstall.stdout.pipe(logStream);
+      yarnInstall.stdout.pipe(process.stdout);
+      yarnInstall.stderr.pipe(logStream);
+      yarnInstall.stderr.pipe(process.stderr);
 
       // Save output so that we can send them to CloudWatch logs.
       const logs = [];
@@ -103,17 +103,17 @@ const processNextMessage = () => {
       };
 
       // Use readline to properly split logs line-by-line.
-      readline.createInterface({ input: npmInstall.stdout }).on('line', collectLogs);
-      readline.createInterface({ input: npmInstall.stderr }).on('line', collectLogs);
+      readline.createInterface({ input: yarnInstall.stdout }).on('line', collectLogs);
+      readline.createInterface({ input: yarnInstall.stderr }).on('line', collectLogs);
 
       var stopLogging = false;
 
-      npmInstall.on('close', (code) => {
-        console.log('npm install exited with code:', code);
+      yarnInstall.on('close', (code) => {
+        console.log('yarn install exited with code:', code);
         logStream.end();
 
         if (code !== 0) {
-          throw('npm install failed with exit code:' + code);
+          throw('yarn install failed with exit code:' + code);
         }
 
         // Zip up node_modules/ directory and upload to S3.
@@ -206,8 +206,8 @@ const processNextMessage = () => {
         }, 10000); // Wait for logs for at most 10 seconds.
       });
 
-      npmInstall.on('error', (err) => {
-        console.warn('Error starting npm install:', err);
+      yarnInstall.on('error', (err) => {
+        console.warn('Error starting yarn install:', err);
         return next(err);
       });
 
@@ -249,7 +249,7 @@ const processNextMessage = () => {
           };
           cloudwatchlogs.putLogEvents(params, (err, data) => {
             if (err) {
-              console.warn('Error writing npm output to CloudWatch logs:', err);
+              console.warn('Error writing yarn output to CloudWatch logs:', err);
             } else {
               sequenceToken = data.nextSequenceToken;
               inFlight = false;
