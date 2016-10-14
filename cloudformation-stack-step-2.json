@@ -361,7 +361,7 @@
             { "Name": "NFX_WEB_RESPONSE_LOG_GROUP", "Value": { "Ref": "ECSLogGroup" } }
           ],
           "PortMappings": [
-            { "ContainerPort": "80" }
+            { "ContainerPort": "3333" }
           ],
           "LogConfiguration": {
             "LogDriver": "awslogs",
@@ -385,7 +385,7 @@
         "DesiredCount": 1,
         "LoadBalancers" : [{
           "TargetGroupArn" : { "Ref" : "ALBTargetGroup" },
-          "ContainerPort" : "80",
+          "ContainerPort" : "3333",
           "ContainerName" : "nfx-depbuilder-web"
         }],
         "Role" : { "Ref":"ECSWebServiceRole" }

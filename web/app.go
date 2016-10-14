@@ -89,6 +89,10 @@ func AppRouter() http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.CloseNotify)
 
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("OK"))
+	})
+
 	r.Route("/jobs", func(r chi.Router) {
 		r.Post("/", createJob)
 
