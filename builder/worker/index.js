@@ -171,7 +171,7 @@ const processNextMessage = () => {
               };
               sqs.deleteMessage(params, (err, data) => {
                 if (err) {
-                  console.warn(`Error deleting message ${msg.MessageId} from queue: ${err}`);
+                  console.warn(`Error deleting message from queue: ${err}`);
                 }
 
                 next(err);
