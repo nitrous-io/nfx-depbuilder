@@ -355,9 +355,16 @@ func jobResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	render.Status(r, http.StatusOK)
-	render.JSON(w, r, map[string]interface{}{
-		"url": url,
-	})
+
+	// We manually respond with JSON instead of using Chi's render.JSON()
+	// so that we can disable escaping of "&" characters in the pre-signed URL.
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(map[string]interface{}{"url": url}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 }
 
 func renderFatalError(w http.ResponseWriter, r *http.Request, err error) {
