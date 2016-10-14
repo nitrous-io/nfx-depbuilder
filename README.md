@@ -54,7 +54,7 @@ Prerequisites:
 
 Steps:
 
-1. Build the Docker image specified in [`builder/Dockerfile`](builder/Dockerfile):
+1. Build the builder Docker image specified in [`builder/Dockerfile`](builder/Dockerfile):
   `cd builder && make release`
 * Retrieve the `docker login` command that you can use to authenticate your
    Docker client to the Amazon ECR registry:
@@ -68,7 +68,8 @@ Steps:
 ### 3. Push Web Docker Image
 
 Steps:
-1. Build the web server Docker image:
+
+1. Build the web server Docker image specified in [`web/Dockerfile`](web/Dockerfile):
    `cd web && make release`
 * Retrieve the `docker login` command that you can use to authenticate your
    Docker client to the Amazon ECR registry:
