@@ -319,7 +319,7 @@
             }
           }
         }],
-        "TaskRoleArn": { "Ref": "ECSTaskRole" }
+        "TaskRoleArn": { "Ref": "ECSBuilderTaskRole" }
       }
     },
 
@@ -372,7 +372,7 @@
             }
           }
         }],
-        "TaskRoleArn": { "Ref": "ECSTaskRole" }
+        "TaskRoleArn": { "Ref": "ECSWebTaskRole" }
       }
     },
 
@@ -561,7 +561,7 @@
       }
     },
 
-    "ECSTaskRole": {
+    "ECSWebTaskRole" :{
       "Type": "AWS::IAM::Role",
       "Properties": {
         "AssumeRolePolicyDocument": {
@@ -597,6 +597,7 @@
                   "Effect": "Allow",
                   "Action": [
                     "sqs:ReceiveMessage",
+                    "sqs:SendMessage",
                     "sqs:DeleteMessage",
                     "sqs:ChangeMessageVisibility"
                   ],
@@ -626,6 +627,62 @@
                     { "Ref": "AWS::AccountId" },
                     ":task-definition/*:*"
                   ] ] }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:GetLogEvents",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": { "Fn::GetAtt": ["ECSLogGroup", "Arn"] }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+
+    "ECSBuilderTaskRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": [ "ecs-tasks.amazonaws.com" ]
+            },
+            "Action": [ "sts:AssumeRole" ]
+          }
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "ecs-task",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:PutObject"
+                  ],
+                  "Resource": { "Fn::Join" : ["", [
+                    "arn:aws:s3:::",
+                    { "Ref" : "JobsBucket" },
+                    "/*"
+                  ] ] }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:ChangeMessageVisibility"
+                  ],
+                  "Resource": { "Fn::GetAtt": ["JobQueue", "Arn"] }
                 },
                 {
                   "Effect": "Allow",
