@@ -598,7 +598,6 @@
                   "Action": [
                     "sqs:ReceiveMessage",
                     "sqs:SendMessage",
-                    "sqs:DeleteMessage",
                     "sqs:ChangeMessageVisibility"
                   ],
                   "Resource": { "Fn::GetAtt": ["JobQueue", "Arn"] }
@@ -680,6 +679,7 @@
                   "Effect": "Allow",
                   "Action": [
                     "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
                     "sqs:ChangeMessageVisibility"
                   ],
                   "Resource": { "Fn::GetAtt": ["JobQueue", "Arn"] }
