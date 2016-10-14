@@ -54,8 +54,10 @@ Prerequisites:
 
 Steps:
 
-1. Build the builder Docker image specified in [`builder/Dockerfile`](builder/Dockerfile):
-  `cd builder && make release`
+1. Install dependencies for the builder app (using [Yarn](https://yarnpkg.com/)):
+   `cd builder && yarn install --production`
+* Build the builder Docker image specified in [`builder/Dockerfile`](builder/Dockerfile):
+  `make release`
 * Retrieve the `docker login` command that you can use to authenticate your
    Docker client to the Amazon ECR registry:
    `aws ecr get-login --region <AWS_REGION>`
