@@ -12,6 +12,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
@@ -23,14 +24,43 @@ import (
 	"github.com/nitrous-io/nfx-depbuilder/web/queue"
 )
 
+var (
+	fakeNitrous         *httptest.Server
+	validNitrousToken   = "this-is-valid"
+	invalidNitrousToken = "this-is-invalid"
+)
+
 func TestMain(m *testing.M) {
+	fakeNitrous = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+
+		if authHeader != "Bearer "+validNitrousToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":             "invalid_token",
+				"error_description": "access token is invalid",
+			})
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"user": map[string]interface{}{
+				"username": "tandy",
+			},
+		})
+	}))
+
 	config.AWSRegion = "kl-orgrimmar-1"
 	config.S3Bucket = "nfx-jobs"
 	config.SQSQueueURL = "https://sqs.kl-orgrimmar-1.amazonaws.test/12345/a-queue"
 	config.TaskDefinitionARN = "arn:aws:ecs:kl-orgrimmar-1:123:task-definition/taskdef:1"
 	config.TaskClusterName = "fake-cluster"
+	config.NitrousHost = fakeNitrous.URL
 
-	os.Exit(m.Run())
+	code := m.Run()
+	fakeNitrous.Close()
+	os.Exit(code)
 }
 
 func matchJSON(t *testing.T, res *http.Response, expected string) {
@@ -87,6 +117,7 @@ func doMultipartRequest(t *testing.T, u string, uploadBody string) *http.Respons
 	}
 
 	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+validNitrousToken)
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -105,6 +136,7 @@ func TestCreateJobEmptyBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error creating POST request: %v", err)
 	}
+	req.Header.Set("Authorization", "Bearer "+validNitrousToken)
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -128,8 +160,16 @@ func TestCreateJobNotMultipartRequest(t *testing.T) {
 	ts := httptest.NewServer(r)
 	defer ts.Close()
 
-	res, err := http.PostForm(ts.URL+"/jobs",
-		url.Values{"file": {validPackageJSON}})
+	data := url.Values{"file": {validPackageJSON}}
+
+	req, err := http.NewRequest("POST", ts.URL+"/jobs", strings.NewReader(data.Encode()))
+	if err != nil {
+		t.Fatalf("error creating request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+validNitrousToken)
+
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("error making POST request: %v", err)
 	}
@@ -151,8 +191,16 @@ func TestCreateJobUploadTooLarge(t *testing.T) {
 	ts := httptest.NewServer(r)
 	defer ts.Close()
 
-	res, err := http.PostForm(ts.URL+"/jobs",
-		url.Values{"file": {largeBody}})
+	data := url.Values{"file": {largeBody}}
+
+	req, err := http.NewRequest("POST", ts.URL+"/jobs", strings.NewReader(data.Encode()))
+	if err != nil {
+		t.Fatalf("error creating request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+validNitrousToken)
+
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("error making POST request: %v", err)
 	}
@@ -203,6 +251,8 @@ func TestCreateJobMissingContentLength(t *testing.T) {
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.ContentLength = -1
 
+	req.Header.Set("Authorization", "Bearer "+validNitrousToken)
+
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("error making multipart request: %v", err)
@@ -252,6 +302,7 @@ func TestCreateJobMultipartFormNameIncorrect(t *testing.T) {
 	}
 
 	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+validNitrousToken)
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -601,9 +652,16 @@ func TestGetJobDownloadsStatusFromS3(t *testing.T) {
 	ts := httptest.NewServer(r)
 	defer ts.Close()
 
-	res, err := http.Get(ts.URL + "/jobs/" + job.ID)
+	req, err := http.NewRequest("GET", ts.URL+"/jobs/+job.ID", nil)
 	if err != nil {
-		t.Fatalf("error with GET request to endpoint: %v", err)
+		t.Fatalf("error creating request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+validNitrousToken)
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("error making POST request: %v", err)
 	}
 
 	if res.StatusCode != http.StatusOK {
@@ -631,6 +689,35 @@ func TestGetJobDownloadsStatusFromS3(t *testing.T) {
 	}
 }
 
+func TestCreateJobInvalidNitrousAccessToken(t *testing.T) {
+	r := AppRouter()
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+
+	req, err := http.NewRequest("POST", ts.URL+"/jobs", nil)
+	if err != nil {
+		t.Fatalf("error creating request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+invalidNitrousToken)
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("error making POST request: %v", err)
+	}
+
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected response status to be %v, but got %v",
+			http.StatusOK, res.StatusCode)
+	}
+
+	expectedJSON := `{
+		"error": "invalid_token",
+		"error_description": "Nitrous access token is invalid"
+	}`
+	matchJSON(t, res, expectedJSON)
+}
+
 func TestGetJobNotFound(t *testing.T) {
 	// Fake S3 download so that tests run without actually trying to download.
 	origS3 := S3
@@ -644,9 +731,16 @@ func TestGetJobNotFound(t *testing.T) {
 	ts := httptest.NewServer(r)
 	defer ts.Close()
 
-	res, err := http.Get(ts.URL + "/jobs/abc123")
+	req, err := http.NewRequest("GET", ts.URL+"/jobs/abc123", nil)
 	if err != nil {
-		t.Fatalf("error with GET request to endpoint: %v", err)
+		t.Fatalf("error creating request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+validNitrousToken)
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("error making POST request: %v", err)
 	}
 
 	if res.StatusCode != http.StatusNotFound {
@@ -657,6 +751,35 @@ func TestGetJobNotFound(t *testing.T) {
 	expectedJSON := `{
 		"error": "not_found",
 		"error_description": "no such job"
+	}`
+	matchJSON(t, res, expectedJSON)
+}
+
+func TestGetJobInvalidNitrousAccessToken(t *testing.T) {
+	r := AppRouter()
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+
+	req, err := http.NewRequest("GET", ts.URL+"/jobs/somejob", nil)
+	if err != nil {
+		t.Fatalf("error creating request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+invalidNitrousToken)
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("error making POST request: %v", err)
+	}
+
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected response status to be %v, but got %v",
+			http.StatusOK, res.StatusCode)
+	}
+
+	expectedJSON := `{
+		"error": "invalid_token",
+		"error_description": "Nitrous access token is invalid"
 	}`
 	matchJSON(t, res, expectedJSON)
 }
@@ -682,9 +805,16 @@ func TestJobResult(t *testing.T) {
 	ts := httptest.NewServer(r)
 	defer ts.Close()
 
-	res, err := http.Get(ts.URL + "/jobs/" + job.ID + "/result")
+	req, err := http.NewRequest("GET", ts.URL+"/jobs/"+job.ID+"/result", nil)
 	if err != nil {
-		t.Fatalf("error with GET request to endpoint: %v", err)
+		t.Fatalf("error creating request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+validNitrousToken)
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("error making POST request: %v", err)
 	}
 
 	if res.StatusCode != http.StatusOK {
@@ -731,9 +861,16 @@ func TestJobResultReturnsNotFoundIfJobFailed(t *testing.T) {
 	ts := httptest.NewServer(r)
 	defer ts.Close()
 
-	res, err := http.Get(ts.URL + "/jobs/" + job.ID + "/result")
+	req, err := http.NewRequest("GET", ts.URL+"/jobs/"+job.ID+"/result", nil)
 	if err != nil {
-		t.Fatalf("error with GET request to endpoint: %v", err)
+		t.Fatalf("error creating request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+validNitrousToken)
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("error making POST request: %v", err)
 	}
 
 	if res.StatusCode != http.StatusNotFound {
@@ -767,9 +904,16 @@ func TestJobResultReturnsNotFoundIfJobNotComplete(t *testing.T) {
 	ts := httptest.NewServer(r)
 	defer ts.Close()
 
-	res, err := http.Get(ts.URL + "/jobs/" + job.ID + "/result")
+	req, err := http.NewRequest("GET", ts.URL+"/jobs/"+job.ID+"/result", nil)
 	if err != nil {
-		t.Fatalf("error with GET request to endpoint: %v", err)
+		t.Fatalf("error creating request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+validNitrousToken)
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("error making POST request: %v", err)
 	}
 
 	if res.StatusCode != http.StatusNotFound {
@@ -804,9 +948,16 @@ func TestJobResultArtifactNotFound(t *testing.T) {
 	ts := httptest.NewServer(r)
 	defer ts.Close()
 
-	res, err := http.Get(ts.URL + "/jobs/" + job.ID + "/result")
+	req, err := http.NewRequest("GET", ts.URL+"/jobs/"+job.ID+"/result", nil)
 	if err != nil {
-		t.Fatalf("error with GET request to endpoint: %v", err)
+		t.Fatalf("error creating request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+validNitrousToken)
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("error making POST request: %v", err)
 	}
 
 	if res.StatusCode != http.StatusInternalServerError {
@@ -817,6 +968,35 @@ func TestJobResultArtifactNotFound(t *testing.T) {
 	expectedJSON := `{
 		"error": "internal_server_error",
 		"error_description": "job has completed but result is unavailable"
+	}`
+	matchJSON(t, res, expectedJSON)
+}
+
+func TestJobResultInvalidNitrousAccessToken(t *testing.T) {
+	r := AppRouter()
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+
+	req, err := http.NewRequest("GET", ts.URL+"/jobs/somejob/result", nil)
+	if err != nil {
+		t.Fatalf("error creating request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+invalidNitrousToken)
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("error making POST request: %v", err)
+	}
+
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected response status to be %v, but got %v",
+			http.StatusOK, res.StatusCode)
+	}
+
+	expectedJSON := `{
+		"error": "invalid_token",
+		"error_description": "Nitrous access token is invalid"
 	}`
 	matchJSON(t, res, expectedJSON)
 }
@@ -871,9 +1051,16 @@ func TestJobLogsGetsLogsFromCloudWatchLogs(t *testing.T) {
 	ts := httptest.NewServer(r)
 	defer ts.Close()
 
-	res, err := http.Get(ts.URL + "/jobs/" + job.ID + "/logs")
+	req, err := http.NewRequest("GET", ts.URL+"/jobs/"+job.ID+"/logs", nil)
 	if err != nil {
-		t.Fatalf("error with GET request to endpoint: %v", err)
+		t.Fatalf("error creating request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+validNitrousToken)
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("error making POST request: %v", err)
 	}
 
 	if res.StatusCode != http.StatusOK {
@@ -985,6 +1172,7 @@ func TestJobLogsNextTokenParam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error creating request: %v", err)
 	}
+	req.Header.Set("Authorization", "Bearer "+validNitrousToken)
 
 	if _, err := http.DefaultClient.Do(req); err != nil {
 		t.Fatalf("error making multipart request: %v", err)
@@ -1001,6 +1189,35 @@ func TestJobLogsNextTokenParam(t *testing.T) {
 		t.Fatalf("expected nextToken param to be %q but it was %q",
 			nextToken, *input.NextToken)
 	}
+}
+
+func TestJobLogsInvalidNitrousAccessToken(t *testing.T) {
+	r := AppRouter()
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+
+	req, err := http.NewRequest("GET", ts.URL+"/jobs/somejob/logs", nil)
+	if err != nil {
+		t.Fatalf("error creating request: %v", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+invalidNitrousToken)
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("error making POST request: %v", err)
+	}
+
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected response status to be %v, but got %v",
+			http.StatusOK, res.StatusCode)
+	}
+
+	expectedJSON := `{
+		"error": "invalid_token",
+		"error_description": "Nitrous access token is invalid"
+	}`
+	matchJSON(t, res, expectedJSON)
 }
 
 const validPackageJSON = `{

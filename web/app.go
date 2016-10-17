@@ -94,6 +94,7 @@ func AppRouter() http.Handler {
 	})
 
 	r.Route("/jobs", func(r chi.Router) {
+		r.Use(AuthCtx)
 		r.Post("/", createJob)
 
 		r.Route("/:jobID", func(r chi.Router) {

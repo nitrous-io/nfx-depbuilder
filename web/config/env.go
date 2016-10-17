@@ -12,6 +12,8 @@ var (
 	TaskDefinitionARN = os.Getenv("NFX_WEB_TASK_DEF_ARN")
 	TaskClusterName   = os.Getenv("NFX_WEB_TASK_CLUSTER_NAME")
 	ResponseLogGroup  = os.Getenv("NFX_WEB_RESPONSE_LOG_GROUP")
+
+	NitrousHost = os.Getenv("NITROUS_HOST")
 )
 
 func Validate() error {
@@ -32,6 +34,9 @@ func Validate() error {
 	}
 	if ResponseLogGroup == "" {
 		return errors.New("NFX_WEB_RESPONSE_LOG_GROUP env var is required")
+	}
+	if NitrousHost == "" {
+		return errors.New("NITROUS_HOST env var is required")
 	}
 
 	return nil
