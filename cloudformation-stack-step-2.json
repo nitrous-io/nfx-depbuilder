@@ -21,6 +21,12 @@
       "ConstraintDescription": "must be the ARN of an AWS Ceritificate Manager certificate."
     },
 
+    "NitrousHost": {
+      "Type": "String",
+      "Default": "https://www.nitrous.io",
+      "Description": "Hostname of Nitrous API, e.g. https://www.nitrous.io."
+    },
+
     "EcsAmiId": {
       "Type": "String",
       "Description": "AMI ID for use in ECS."
@@ -364,7 +370,8 @@
             { "Name": "NFX_WEB_TASK_DEF_ARN", "Value": { "Ref": "ECSBuilderServiceTaskDefinition" } },
             { "Name": "NFX_WEB_TASK_CLUSTER_NAME", "Value": { "Ref": "ECSCluster" } },
             { "Name": "NFX_WEB_SQS_QUEUE_URL", "Value": { "Ref": "JobQueue" } },
-            { "Name": "NFX_WEB_RESPONSE_LOG_GROUP", "Value": { "Ref": "ECSLogGroup" } }
+            { "Name": "NFX_WEB_RESPONSE_LOG_GROUP", "Value": { "Ref": "ECSLogGroup" } },
+            { "Name": "NITROUS_HOST", "Value": { "Ref": "NitrousHost" } }
           ],
           "PortMappings": [
             { "ContainerPort": "3333" }
